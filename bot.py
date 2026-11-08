@@ -39,7 +39,7 @@ from handlers.telegram_ui import edit_callback_message, callback_message_kind
 from handlers.v38_views import device_summary, dashboard_summary, node_metrics_summary, http_stats_summary, geocheck_summary, top_hwid_users_summary, fit_message
 from jobs.anomaly import build_anomaly_incidents
 from jobs.expiry import should_send_expire_notice
-from utils.constants import APP_VERSION, USER_STATUS_ACTIVE, USER_STATUS_LIMITED, USER_STATUS_DISABLED
+from utils.constants import APP_VERSION, PANEL_TARGET_VERSION, USER_STATUS_ACTIVE, USER_STATUS_LIMITED, USER_STATUS_DISABLED
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
@@ -2107,7 +2107,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"{preview}\n"
             "```\n\n"
             f"最近回滚点：`{latest_text}`\n"
-            "仅可提交 Remnawave 3.4.4 契约定义的字段。"
+            f"仅可提交 Remnawave {PANEL_TARGET_VERSION} 契约定义的字段。"
         )
         kb = [
             [InlineKeyboardButton("✍️ 修改订阅设置(JSON)", callback_data="admin_subscription_settings_edit")],
@@ -3801,5 +3801,5 @@ if __name__ == '__main__':
     if panel_config_ready():
         app.job_queue.run_once(warmup_panel_runtime_job, when=5, name='warmup_panel_runtime_job')
 
-    print(f"🚀 RemnaShop-Pro {APP_VERSION} 已启动 | 监听中...")
+    print(f"🚀 RemnaShop-Pro {APP_VERSION} 已启动 | Remnawave {PANEL_TARGET_VERSION} | 监听中...")
     app.run_polling()

@@ -1,10 +1,10 @@
 # 🚀 RemnaShop-Pro
 
-当前版本：`V3.8.1`
+当前版本：`V3.8.2`
 
 RemnaShop-Pro 是一个面向 **Remnawave 面板** 的 Telegram 机器人，提供订阅售卖、续费、状态查询与基础运维能力。
 
-当前适配目标为 **Remnawave Panel 3.4.4**，对应官方
+当前适配目标为 **Remnawave Panel 3.4.8**，对应官方
 `@remnawave/backend-contract 3.4.15`。接口来源、完整调用清单和旧数据升级规则
 分别见 [契约来源](docs/remnawave-contract-source.md)、
 [完整 OpenAPI 差异](docs/remnawave-openapi-diff.md)、
@@ -13,7 +13,15 @@ RemnaShop-Pro 是一个面向 **Remnawave 面板** 的 Telegram 机器人，提�
 [V3.7 RC 验收步骤](docs/v3.7-rc-runbook.md)、
 [人工 UI 清单](docs/v3.7-rc-ui-checklist.md) 和
 [V3.8 发布说明](docs/releases/v3.8.md) 和
-[V3.8.1 发布说明](docs/releases/v3.8.1.md)。
+[V3.8.1 发布说明](docs/releases/v3.8.1.md) 和
+[V3.8.2 发布说明](docs/releases/v3.8.2.md)。
+
+已核对 2026-11-08 的官方最新稳定版：Panel 3.4.8 源码仍使用契约 3.4.15。
+官方 3.4.8 OpenAPI 与此前 3.4.4 的路径、参数和 Schema 相同；仓库已更新为
+实际下载的 3.4.8 契约，并加入版本与校验值锁定。详见
+[3.4.8 兼容性与升级验收](docs/remnawave-3.4.8-compatibility.md)。
+所有 Panel 写请求均禁止 HTTP 层自动重试，避免响应丢失后重复开通、续期或重置；
+读取仍保留有界重试，写入结果不确定时须先人工核对。
 
 ---
 
@@ -261,13 +269,13 @@ docker compose -p remnashop ps
 
 > 若旧机器仍在运行 `remnashop.service`，请先停用旧服务再切换，避免重复实例同时运行。
 
-### 从 Remnawave 2.x 升级到 3.4.4
+### 从 Remnawave 2.x 升级到 3.4.8
 
 升级前备份 `remnashop-data` 数据卷。旧 SQLite 中的用户 UUID 会完整保留；
 新版以数值用户 ID 调用面板。只有 Telegram ID 对应关系唯一时才自动绑定；
 其他记录显示为“待迁移”或“有歧义”，需要管理员按
 [迁移说明](docs/remnawave-v3-migration.md)核对绑定。未绑定的旧订阅不会被
-自动重建、续费或删除。旧版本机器人无法继续调用 3.4.4 已移除的 UUID 路由，
+自动重建、续费或删除。旧版本机器人无法继续调用 3.x 已移除的 UUID 路由，
 不要把回滚机器人代码当作可直接恢复兼容性的办法。
 
 ---

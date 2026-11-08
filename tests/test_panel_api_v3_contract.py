@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import httpx
 from services import panel_api
+from utils.constants import PANEL_TARGET_VERSION
 
 
 SPEC = json.loads(Path("docs/remnawave-openapi.json").read_text(encoding="utf-8"))
@@ -317,7 +318,7 @@ class TestPanelApiV3Contract(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(panel_api.UPDATE_USER_FIELDS, set(schemas["UpdateUserBodyDto"]["properties"]))
         self.assertEqual(panel_api.BULK_UPDATE_FIELDS,
                          set(schemas["BulkUpdateUsersBodyDto"]["properties"]["fields"]["properties"]))
-        self.assertEqual(SPEC["info"]["version"], "3.4.4")
+        self.assertEqual(SPEC["info"]["version"], PANEL_TARGET_VERSION)
         tree = ast.parse(Path("services/panel_api.py").read_text(encoding="utf-8"))
         operations = {
             (method.upper(), path.removeprefix("/api"))

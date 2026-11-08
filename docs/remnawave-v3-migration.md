@@ -1,11 +1,14 @@
-# Remnawave 2.x to 3.4.4 migration
+# Remnawave 2.x to 3.4.8 migration
 
-RemnaShop-Pro targets Remnawave Panel **3.4.4** and
+RemnaShop-Pro targets Remnawave Panel **3.4.8** and
 `@remnawave/backend-contract` **3.4.15**. See
 [contract provenance](remnawave-contract-source.md) and the
 [complete runtime API inventory](remnawave-api-inventory.md). The
 [full operation diff](remnawave-openapi-diff.md) covers all 2.7.4 and 3.4.4
 OpenAPI paths, including operations outside this bot's runtime surface.
+The official 3.4.8 paths and schemas are identical to 3.4.4; see the
+[3.4.8 compatibility verification](remnawave-3.4.8-compatibility.md).
+The historical 3.4.4 comparisons below therefore still apply to this target.
 
 ## Contract changes that affect this bot
 
@@ -69,8 +72,9 @@ ambiguous when usage resumes immediately. For this RC, the internal state
 `submitted` means only that Panel accepted the request. No speculative
 `/jobs` endpoint or misleading `completed` state is used.
 
-Idempotent field updates may be retried up to three times after a transient
-failure. A lost response to reset or delete can mean that Panel already acted;
+Explicitly safe field assignments may be retried by the persisted bulk job
+worker up to three attempts after a transient failure. The HTTP client never
+replays any mutating request; automatic HTTP retries are restricted to reads. A lost response to reset or delete can mean that Panel already acted;
 those jobs become `unknown` and require an administrator to inspect the
 numeric user IDs before deciding whether to resubmit. An interrupted
 `running` job follows the same rule. A future bounded reconciliation feature
@@ -94,7 +98,7 @@ directory while installing. Installation succeeds only after the container
 becomes healthy.
 
 The upgraded database keeps legacy columns, but **downgrading the bot against
-a 3.4.4 Panel is unsupported**: the old runtime uses removed user UUID routes.
+a 3.4.8 Panel is unsupported**: the old runtime uses removed user UUID routes.
 Keep a pre-upgrade volume backup for a controlled rollback of bot data and
 configuration. Restoring a backup overwrites later local changes, so perform
 it only after reviewing those changes.
