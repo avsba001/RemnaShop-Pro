@@ -5,6 +5,11 @@ import json
 import os
 import asyncio
 import qrcode
+import httpx
+from services.zpay import ZPayConfig, ZPayClient, PaymentError, yuan, money_fen
+from services.payment_processing import reconcile_payment
+from storage.plan_groups import plan_groups, snapshot_groups, validate_groups, require_available
+from storage import payments
 from io import BytesIO
 from collections import defaultdict
 from services.panel_api import get_panel_user as api_get_panel_user, get_user_by_telegram_id as api_get_user_by_telegram_id, get_user_by_username as api_get_user_by_username, get_user_by_short_uuid as api_get_user_by_short_uuid, get_nodes_status as api_get_nodes_status, get_subscription_history_stats as api_get_subscription_history_stats, get_user_subscription_history as api_get_user_subscription_history, get_subscription_settings as api_get_subscription_settings, patch_subscription_settings as api_patch_subscription_settings, get_internal_squads as api_get_internal_squads, get_internal_squad_accessible_nodes as api_get_internal_squad_accessible_nodes, get_bandwidth_nodes_usage as api_get_bandwidth_nodes_usage, bulk_move_users_to_squad as api_bulk_move_users_to_squad, create_user as api_create_user, patch_user as api_patch_user, delete_user as api_delete_user, enable_user as api_enable_user, disable_user as api_disable_user, reset_user_traffic as api_reset_user_traffic, get_subscription_request_history as api_get_subscription_request_history, bulk_delete_users as api_bulk_delete_users, bulk_update_users as api_bulk_update_users, get_contract_capabilities as api_get_contract_capabilities, set_user_metadata as api_set_user_metadata, block_ip_address as api_block_ip_address, get_system_health as api_get_system_health, get_system_stats as api_get_system_stats, get_system_stats_recap as api_get_system_stats_recap, get_snippet_by_key as api_get_snippet_by_key, get_subscription_page_configs as api_get_subscription_page_configs, get_external_squads as api_get_external_squads, get_config_profiles as api_get_config_profiles, get_user_accessible_nodes as api_get_user_accessible_nodes, close_all_clients, extract_payload
@@ -14,7 +19,6 @@ from services.panel_api import subscription_settings_patch_from_current
 from services.panel_api import run_bulk_action as api_run_bulk_action
 from services import panel_api as v38_api
 from services.orders import (
-    create_order,
     get_order,
     update_order_status,
     attach_payment_text,
@@ -39,7 +43,7 @@ from handlers.telegram_ui import edit_callback_message, callback_message_kind
 from handlers.v38_views import device_summary, dashboard_summary, node_metrics_summary, http_stats_summary, geocheck_summary, top_hwid_users_summary, fit_message
 from jobs.anomaly import build_anomaly_incidents
 from jobs.expiry import should_send_expire_notice
-from utils.constants import APP_VERSION, USER_STATUS_ACTIVE, USER_STATUS_LIMITED, USER_STATUS_DISABLED
+from utils.constants import APP_VERSION, PANEL_TARGET_VERSION, USER_STATUS_ACTIVE, USER_STATUS_LIMITED, USER_STATUS_DISABLED
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
@@ -305,10 +309,16 @@ def resolve_payment_state(payment_method):
         return {'available': False, 'method_label': method_label, 'should_send_qr': False, 'qr_file_id': qr_file_id, 'pay_tip': "USDT 收款未配置完成，请等待管理员配置。"}
 
     return {'available': False, 'method_label': payment_method, 'should_send_qr': False, 'qr_file_id': None, 'pay_tip': "不支持的支付方式。"}
+def payment_config_ready():
+    try:
+        ZPayConfig.from_env()
+        return True
+    except PaymentError:
+        return False
+
+
 def is_any_payment_available():
-    manual_review = resolve_payment_state('manual_review')['available']
-    usdt = resolve_payment_state('usdt')['available']
-    return manual_review or usdt
+    return payment_config_ready()
 
 
 def get_json_setting(key, default):
@@ -1098,12 +1108,42 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if data == "client_pay_done_upload":
-        await query.answer("✅ 已切换为“发送凭证即提交审核”，请直接发送支付凭证。", show_alert=True)
+        await query.answer("人工审核入口已关闭，请使用支付宝收银台。", show_alert=True)
         return
 
 
+    if data.startswith("client_paycheck_"):
+        order_id = data.removeprefix("client_paycheck_")
+        order = get_order(db_query, order_id)
+        if not order or int(order['tg_id']) != int(user_id):
+            await query.answer("订单不存在或无权限", show_alert=True)
+            return
+        intent = payments.for_business(DB_FILE, order_id)
+        if not intent:
+            await query.answer("该订单不是在线支付订单", show_alert=True)
+            return
+        # The callback was acknowledged above. Render results as a message instead
+        # of answering a second time after a potentially slow gateway request.
+        if intent['status'] == 'new':
+            message = "尚未生成支付单。请打开收银台，点击“前往 ZPAY 支付宝收银台”完成支付后再查询。"
+        else:
+            await send_or_edit_menu(update, context, "正在查询支付状态，请稍候……", None, parse_mode=None)
+            try:
+                cfg = ZPayConfig.from_env()
+                async with httpx.AsyncClient(trust_env=False) as http:
+                    intent = await reconcile_payment(DB_FILE, intent['payment_id'], cfg, ZPayClient(cfg, http))
+                message = "已付款，正在自动交付。" if intent['status'] == 'paid' else "暂未确认付款，请稍后查询；不要重复付款。"
+            except PaymentError as exc:
+                logger.warning("Payment query unavailable code=%s", str(exc))
+                message = ("ZPAY 查单未成功：" + (exc.gateway_message or "网关未返回有效订单") + "。请联系管理员核对，不要重复下单。"
+                           if str(exc) == 'gateway_query_rejected' else "查询暂不可用，请稍后重试；不要重复付款。")
+        keyboard = [[InlineKeyboardButton("🔄 查询支付状态", callback_data=f"client_paycheck_{order_id}")],
+                    [InlineKeyboardButton("🔙 返回订单", callback_data=f"client_order_{order_id}")]]
+        await send_or_edit_menu(update, context, message, InlineKeyboardMarkup(keyboard), parse_mode=None)
+        return
+
     if data == "client_orders":
-        rows = db_query("SELECT * FROM orders WHERE tg_id=? ORDER BY created_at DESC LIMIT 12", (user_id,))
+        rows = db_query(f"SELECT * FROM orders WHERE tg_id=? AND {payments.VISIBLE_ORDER_SQL} ORDER BY created_at DESC LIMIT 12", (user_id,))
         if not rows:
             await send_or_edit_menu(update, context, "📄 **我的订单**\n暂无订单记录。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
             return
@@ -1122,13 +1162,16 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not order or int(order.get('tg_id', 0)) != int(user_id):
             await query.answer("订单不存在", show_alert=True)
             return
+        if payments.for_business(DB_FILE, order_id):
+            await query.answer("在线支付单不能直接取消，避免已付款但未交付；请联系管理员核对。", show_alert=True)
+            return
         ok = update_order_status(db_execute, order_id, [STATUS_PENDING], STATUS_REJECTED, error_message='cancelled_by_user')
         if ok:
             append_order_audit_log(db_execute, order_id, 'cancel_by_user', user_id, 'user_cancel_pending_order')
             await query.answer("✅ 已取消订单", show_alert=True)
         else:
             await query.answer("⚠️ 仅待审核订单可取消", show_alert=True)
-        rows = db_query("SELECT * FROM orders WHERE tg_id=? ORDER BY created_at DESC LIMIT 12", (user_id,))
+        rows = db_query(f"SELECT * FROM orders WHERE tg_id=? AND {payments.VISIBLE_ORDER_SQL} ORDER BY created_at DESC LIMIT 12", (user_id,))
         keyboard = []
         for row in rows:
             item = dict(row)
@@ -1143,6 +1186,10 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         order = get_order(db_query, order_id)
         if not order or int(order.get('tg_id', 0)) != int(user_id):
             await send_or_edit_menu(update, context, "⚠️ 订单不存在或无权限查看", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="client_orders")]]))
+            return
+        if payments.is_order_deleted(DB_FILE, order_id):
+            await send_or_edit_menu(update, context, "此未支付订单已由管理员从列表删除。删除不会关闭网关付款；若后来核验到账，订单会自动恢复并处理。",
+                                    InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回订单列表", callback_data="client_orders")]]), parse_mode=None)
             return
         plan = db_query("SELECT * FROM plans WHERE key = ?", (order['plan_key'],), one=True)
         plan_name = dict(plan)['name'] if plan else order['plan_key']
@@ -1161,7 +1208,15 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         if order.get('error_message'):
             lines.append(f"失败原因: `{order['error_message']}`")
         kb = []
-        if order['status'] == STATUS_PENDING:
+        intent = payments.for_business(DB_FILE, order_id)
+        if intent:
+            lines.append(f"支付状态: `{'已付款' if intent['status'] == 'paid' else '待付款/待核对'}`")
+            lines.append(f"订单金额: `¥{yuan(intent['amount_fen'])}`")
+            if intent['status'] != 'paid' and payment_config_ready():
+                cfg = ZPayConfig.from_env()
+                kb.append([InlineKeyboardButton("打开支付宝收银台", url=cfg.public_url + '/payments/zpay/checkout/' + intent['checkout_token'])])
+            kb.append([InlineKeyboardButton("查询支付状态", callback_data=f"client_paycheck_{order_id}")])
+        elif order['status'] == STATUS_PENDING:
             kb.append([InlineKeyboardButton("❌ 取消该订单", callback_data=f"client_order_cancel_{order['order_id']}")])
         kb.append([InlineKeyboardButton("🔙 返回订单列表", callback_data="client_orders")])
         await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup(kb))
@@ -1174,7 +1229,7 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             p_dict = dict(p) 
             strategy = p_dict.get('reset_strategy', 'NO_RESET')
             strategy_label = get_strategy_label(strategy)
-            btn_text = f"{p_dict['name']} | ¥{p_dict['price']} / {get_plan_price(p_dict, 'usdt')} | {p_dict['gb']}G ({strategy_label})"
+            btn_text = f"{p_dict['name']} | ¥{p_dict['price']} | {p_dict['gb']}G ({strategy_label})"
             action = f"order_{p_dict['key']}_new_0"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=action)])
         keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")])
@@ -1289,7 +1344,7 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             p_dict = dict(p)
             strategy = p_dict.get('reset_strategy', 'NO_RESET')
             strategy_label = get_strategy_label(strategy)
-            btn_text = f"{p_dict['name']} | ¥{p_dict['price']} / {get_plan_price(p_dict, 'usdt')} | {p_dict['gb']}G ({strategy_label})"
+            btn_text = f"{p_dict['name']} | ¥{p_dict['price']} | {p_dict['gb']}G ({strategy_label})"
             action = f"order_{p_dict['key']}_renew_{short_id}"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=action)])
         keyboard.append([InlineKeyboardButton("🔙 返回列表", callback_data="client_status")])
@@ -1311,32 +1366,53 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await show_payment_method_menu(update, context, plan_key, order_type, short_id)
 
     elif data.startswith("manualreview_"):
-        parts = data.split("_", 3)
-        if len(parts) < 4:
-            logger.warning("Invalid manualreview callback payload: %s", data)
-            await query.answer("参数错误", show_alert=True)
-            return
-        _, plan_key, order_type, short_id = parts
-        await handle_order_confirmation(update, context, plan_key, order_type, short_id, payment_method='manual_review')
+        await query.answer("人工审核入口暂时关闭，请重新选择支付宝支付。", show_alert=True)
+        return
 
     elif data.startswith("paymethod_"):
         parts = data.split("_", 4)
-        if len(parts) < 5:
-            logger.warning("Invalid paymethod callback payload: %s", data)
-            await query.answer("参数错误", show_alert=True)
+        if len(parts) != 5 or parts[1] != "alipay":
+            await query.answer("该支付入口已关闭，请重新选择支付宝支付。", show_alert=True)
             return
-        _, pay_method, plan_key, order_type, short_id = parts
-        if pay_method != "usdt":
-            await query.answer("当前客户端仅支持 人工审核 / USDT。", show_alert=True)
-            return
-        await handle_order_confirmation(update, context, plan_key, order_type, short_id, payment_method='usdt')
+        _, _, plan_key, order_type, short_id = parts
+        await handle_alipay_checkout(update, context, plan_key, order_type, short_id)
 
     elif data == "cancel_order":
         pending = get_pending_order_for_user(db_query, user_id)
-        if pending:
+        if pending and not payments.for_business(DB_FILE, pending["order_id"]):
             update_order_status(db_execute, pending['order_id'], [STATUS_PENDING], STATUS_REJECTED, error_message='cancelled_by_user')
         context.user_data.pop('pending_payment_proof', None)
         await start(update, context)
+
+async def handle_alipay_checkout(update, context, plan_key, order_type, short_id):
+    if update.effective_chat.type != 'private':
+        await update.callback_query.answer("请在与机器人的私聊中支付。", show_alert=True)
+        return
+    if not panel_config_ready():
+        await update.callback_query.answer("面板尚未配置，请联系管理员。", show_alert=True)
+        return
+    target = get_panel_user_id_from_short(short_id) if short_id != '0' else None
+    if order_type == 'renew' and not target:
+        await update.callback_query.answer("续费目标已失效，请重新选择订阅。", show_alert=True)
+        return
+    try:
+        cfg = ZPayConfig.from_env()
+        selected_plan = db_query("SELECT * FROM plans WHERE key=?", (plan_key,), one=True)
+        if selected_plan and dict(selected_plan).get('group_uuids') is not None:
+            require_available(plan_groups(selected_plan), await get_internal_squads())
+        intent = payments.subscription_checkout(DB_FILE, update.effective_user.id, plan_key, order_type, target,
+                                                channel_code=context.user_data.get('channel_code'), group_uuid=TARGET_GROUP_UUID)
+    except (PaymentError, ValueError, TypeError, PanelApiError, httpx.HTTPError):
+        await update.callback_query.answer("无法创建支付订单，请检查套餐价格、订阅归属或联系管理员。", show_alert=True)
+        return
+    kb = [[InlineKeyboardButton("打开支付宝收银台", url=cfg.public_url + '/payments/zpay/checkout/' + intent['checkout_token'])],
+          [InlineKeyboardButton("查询支付状态", callback_data=f"client_paycheck_{intent['business_id']}")],
+          [InlineKeyboardButton("返回我的订单", callback_data="client_orders")]]
+    await send_or_edit_menu(update, context,
+                           f"支付宝支付\n订单：{intent['business_id']}\n金额：¥{yuan(intent['amount_fen'])}\n"
+                           "请打开收银台生成付款二维码。支付成功后自动开通／续费。\n如已付款请勿重复支付。",
+                           InlineKeyboardMarkup(kb))
+
 
 async def show_payment_method_menu(update, context, plan_key, order_type, short_id):
     plan = db_query("SELECT * FROM plans WHERE key = ?", (plan_key,), one=True)
@@ -1344,9 +1420,13 @@ async def show_payment_method_menu(update, context, plan_key, order_type, short_
         await send_or_edit_menu(update, context, "⚠️ 套餐不存在或已下架，请返回重新选择。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
         return
 
-    if not panel_config_ready() or (order_type == 'new' and not TARGET_GROUP_UUID):
+    try:
+        groups = plan_groups(plan, TARGET_GROUP_UUID)
+    except (ValueError, TypeError):
+        groups = []
+    if not panel_config_ready() or (order_type == 'new' and not groups):
         await send_or_edit_menu(
-            update, context, "⚠️ 面板地址、Token 或新购所需默认内部组尚未配置，请联系管理员。",
+            update, context, "⚠️ 面板地址、Token 或套餐内部组尚未配置，请联系管理员。",
             InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]),
         )
         return
@@ -1362,9 +1442,11 @@ async def show_payment_method_menu(update, context, plan_key, order_type, short_
         f"📡 流量：{plan_dict.get('gb')} GB\n\n"
         "请选择下一步："
     )
-    kb = [[InlineKeyboardButton("🧾 人工审核", callback_data=f"manualreview_{plan_key}_{order_type}_{short_id}")]]
-    if resolve_payment_state('usdt')['available'] and str(plan_dict.get('usdt_price') or '').strip():
-        kb.append([InlineKeyboardButton("💠 USDT 转账", callback_data=f"paymethod_usdt_{plan_key}_{order_type}_{short_id}")])
+    kb = []
+    if payment_config_ready():
+        kb.append([InlineKeyboardButton("支付宝扫码支付", callback_data=f"paymethod_alipay_{plan_key}_{order_type}_{short_id}")])
+    else:
+        msg += "\n⚠️ 支付宝支付尚未配置，请联系管理员。"
     kb.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
     await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
 
@@ -1454,100 +1536,141 @@ async def cleanup_panelcfg_prompt_message(context: ContextTypes.DEFAULT_TYPE, ch
 
 
 async def handle_order_confirmation(update, context, plan_key, order_type, short_id, payment_method='manual_review'):
-    user_id = update.effective_user.id
-    target_user_id = get_panel_user_id_from_short(short_id) if short_id != "0" else None
-    if order_type == 'renew' and not target_user_id:
-        await send_or_edit_menu(update, context, "⚠️ 旧订阅尚未完成迁移，暂不能续费。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="client_status")]]))
-        return
-    if order_type == 'renew' and not owned_subscription(user_id, target_user_id):
-        await send_or_edit_menu(update, context, "⚠️ 此订阅不属于当前用户，无法创建续费订单。",
-                                InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="client_status")]]))
-        return
-    if order_type == 'new' and db_query(
-        "SELECT 1 FROM subscriptions WHERE tg_id=? AND user_id IS NULL LIMIT 1", (user_id,), one=True
-    ):
-        await send_or_edit_menu(update, context, "⚠️ 旧订阅正在等待迁移核对，请先联系管理员，避免重复开通。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
-        return
+    # Reject stale entrypoints; historical orders/proofs remain auditable.
+    await send_or_edit_menu(update, context, '此支付入口已关闭，请返回选择支付宝支付。', InlineKeyboardMarkup([[InlineKeyboardButton('返回', callback_data='back_home')]]))
 
-    plan = db_query("SELECT * FROM plans WHERE key = ?", (plan_key,), one=True)
-    if not plan:
+
+async def begin_plan_group_selection(update, context, plan_key=None):
+    context.user_data.pop('plan_group_selection', None)
+    try:
+        inventory = await get_internal_squads()
+        # Read the complete documented inventory; pagination here is Telegram UI only.
+        options = [{'uuid': validate_groups([item['uuid']])[0], 'name': item['name']}
+                   for item in inventory]
+        if not options:
+            raise ValueError('面板中暂无内部组，请先在面板创建后重试')
+        selected = []
+        if plan_key is not None:
+            row = db_query('SELECT * FROM plans WHERE key=?', (plan_key,), one=True)
+            if not row:
+                raise ValueError('套餐已删除')
+            try:
+                selected = plan_groups(row, TARGET_GROUP_UUID)
+            except (ValueError, TypeError):
+                selected = []
+        context.user_data['plan_group_selection'] = {
+            'token': os.urandom(4).hex(), 'plan_key': plan_key,
+            'options': options, 'selected': selected, 'page': 0,
+        }
+    except (PanelApiError, ValueError, TypeError, KeyError, httpx.HTTPError):
+        await send_or_edit_menu(update, context,
+                               '⚠️ 无法获取内部组，请检查面板连接、权限以及是否已创建内部组，然后重试。',
+                               InlineKeyboardMarkup([[InlineKeyboardButton('🔄 重试', callback_data=f'admin_plan_groups_{plan_key}' if plan_key is not None else 'admin_pg_retry')],
+                                                     [InlineKeyboardButton('取消', callback_data='cancel_op')]]), parse_mode=None)
         return
+    await show_plan_group_selection(update, context)
 
-    plan_dict = dict(plan)
-    strategy = plan_dict.get('reset_strategy', 'NO_RESET')
-    strategy_label = get_strategy_label(strategy)
-    type_str = "续费" if order_type == 'renew' else "新购"
 
-    msg_id = None
-    if update.callback_query and update.callback_query.message:
-        msg_id = update.callback_query.message.message_id
+async def show_plan_group_selection(update, context):
+    state = context.user_data['plan_group_selection']
+    page = state['page']
+    options = state['options']
+    token = state['token']
+    prefix = f'admin_pg_{token}_'
+    rows = []
+    for index in range(page * 8, min(len(options), (page + 1) * 8)):
+        item = options[index]
+        mark = '✅' if item['uuid'] in state['selected'] else '⬜'
+        rows.append([InlineKeyboardButton(f"{mark} {item['name'][:40]} | {item['uuid']}",
+                                          callback_data=f'{prefix}toggle_{index}')])
+    nav = []
+    if page:
+        nav.append(InlineKeyboardButton('上一页', callback_data=f'{prefix}page_{page-1}'))
+    if (page + 1) * 8 < len(options):
+        nav.append(InlineKeyboardButton('下一页', callback_data=f'{prefix}page_{page+1}'))
+    if nav:
+        rows.append(nav)
+    rows.extend([[InlineKeyboardButton('🔄 刷新列表', callback_data=f'{prefix}refresh')],
+                 [InlineKeyboardButton('💾 保存所选内部组', callback_data=f'{prefix}save')],
+                 [InlineKeyboardButton('取消', callback_data='cancel_op')]])
+    missing = set(state['selected']) - {item['uuid'] for item in options}
+    title = '🧩 套餐内部组' if state['plan_key'] else '🧩 步骤 6/6：选择套餐内部组'
+    text = (f'{title}\n可多选；至少选择一个。共 {len(options)} 个组，'
+            f'第 {page+1}/{max(1, (len(options)+7)//8)} 页，已选 {len(state["selected"])} 个。\n'
+            '新购使用所选组；续费按购买时套餐的所选组更新权限。')
+    if missing:
+        text += f'\n⚠️ 有 {len(missing)} 个旧组已不存在；保存前请刷新列表移除。'
+    await send_or_edit_menu(update, context, text, InlineKeyboardMarkup(rows), parse_mode=None)
 
-    order, created = create_order(db_query, db_execute, user_id, plan_key, order_type, target_user_id, menu_message_id=msg_id, channel_code=context.user_data.get('channel_code'))
-    if created:
-        append_order_audit_log(db_execute, order['order_id'], 'create', user_id, f"type={order_type};plan={plan_key};channel={context.user_data.get('channel_code') or '-'}")
-        selected_path = "usdt" if payment_method == "usdt" else "manual_review"
-        order_payment_method_cache[order["order_id"]] = selected_path
-        context.user_data['awaiting_manual_review_proof_order_id'] = order['order_id']
-        context.user_data.pop('pending_payment_proof', None)
-    else:
-        msg = "⚠️ 你已有一个待审核订单，请先等待管理员处理，或取消后重新下单。"
-        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
+
+async def handle_plan_group_selection(update, context):
+    data = update.callback_query.data
+    if data == 'admin_pg_retry':
+        if context.user_data.get('add_plan_step') == 'groups':
+            await begin_plan_group_selection(update, context)
         return
-    path_label = "USDT" if payment_method == "usdt" else "人工审核"
-    extra_tip = "👇 请直接在聊天中发送支付凭证（文字说明、截图、图片或文件），发送后会自动提交人工审核。"
-    usdt_qr_file_id = None
-    if payment_method == "usdt":
-        usdt_info = resolve_payment_state('usdt')
-        usdt_price = str(plan_dict.get('usdt_price') or '').strip()
-        if not usdt_info['available'] or not usdt_price:
-            await send_or_edit_menu(update, context, "⚠️ 当前 USDT 未配置完整，请选择人工审核。", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
+    state = context.user_data.get('plan_group_selection')
+    if not state or not data.startswith(f'admin_pg_{state["token"]}_'):
+        await send_or_edit_menu(update, context, '⚠️ 选择页面已失效，请返回套餐管理重新操作。', parse_mode=None)
+        return
+    action = data.removeprefix(f'admin_pg_{state["token"]}_')
+    if action.startswith('toggle_'):
+        raw = action.removeprefix('toggle_')
+        if not raw.isdigit() or int(raw) >= len(state['options']):
             return
-        usdt_network = (get_setting_value('usdt_network', 'TRC20') or 'TRC20').strip().upper()
-        usdt_address = (get_setting_value('usdt_address', '') or '').strip()
-        usdt_qr_file_id = usdt_info.get('qr_file_id') if usdt_info.get('should_send_qr') else None
-        tip_body = usdt_info['pay_tip'] if usdt_info.get('pay_tip') else "请完成转账后提交凭证。"
-        extra_tip = (
-            f"💰 USDT 金额：**{usdt_price} USDT**\n"
-            f"🌐 转账网络：`{usdt_network}`\n"
-            f"🏦 收款地址：`{usdt_address or '未配置'}`\n"
-            f"{tip_body}\n\n"
-            "👇 完成后请发送 TXID/截图/说明，发送后会自动提交人工审核。"
-        )
-    msg = (
-        f"📝 **订单已创建**\n"
-        f"🆔 订单号：`{order['order_id']}`\n"
-        f"📦 套餐：{plan_dict['name']}\n"
-        f"💰 金额：**{plan_dict.get('price')}**\n"
-        f"📡 流量：**{plan_dict['gb']} GB ({strategy_label})**\n"
-        f"🧩 类型：**{type_str}**\n"
-        f"🧾 路径：**{path_label}**\n\n"
-        f"🆔 系统将自动使用当前 Telegram ID：`{user_id}`\n"
-        f"{extra_tip}"
-    )
-    kb = [[InlineKeyboardButton("❌ 取消订单", callback_data="cancel_order")], [InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]]
-    await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
-    if payment_method == "usdt" and usdt_qr_file_id:
-        usdt_price = str(plan_dict.get('usdt_price') or '').strip()
-        usdt_network = (get_setting_value('usdt_network', 'TRC20') or 'TRC20').strip().upper()
-        usdt_address = (get_setting_value('usdt_address', '') or '').strip()
-        qr_caption = (
-            "📷 **USDT 收款码**\n"
-            f"💰 金额：**{usdt_price} USDT**\n"
-            f"🌐 网络：`{usdt_network}`\n"
-            f"🏦 地址：`{usdt_address or '未配置'}`\n"
-            "转账完成后请发送 TXID / 截图 / 备注。"
-        )
+        value = state['options'][int(raw)]['uuid']
+        if value in state['selected']:
+            state['selected'].remove(value)
+        else:
+            state['selected'].append(value)
+    elif action.startswith('page_'):
+        raw = action.removeprefix('page_')
+        if not raw.isdigit() or int(raw) * 8 >= len(state['options']):
+            return
+        state['page'] = int(raw)
+    elif action in {'refresh', 'save'}:
         try:
-            await context.bot.send_photo(chat_id=user_id, photo=usdt_qr_file_id, caption=qr_caption, parse_mode='Markdown')
-        except Exception as exc:
-            logger.warning("failed to send usdt qr image: user=%s order=%s err=%s", user_id, order['order_id'], exc)
+            inventory = await get_internal_squads()
+            if action == 'refresh':
+                state['options'] = [{'uuid': validate_groups([item['uuid']])[0], 'name': item['name']} for item in inventory]
+                available = {item['uuid'] for item in state['options']}
+                state['selected'] = [value for value in state['selected'] if value in available]
+                state['page'] = 0
+                state['token'] = os.urandom(4).hex()
+            else:
+                selected = validate_groups(state['selected'])
+                require_available(selected, inventory)
+                encoded = json.dumps(selected)
+                if state['plan_key'] is not None:
+                    if not db_execute('UPDATE plans SET group_uuids=? WHERE key=?', (encoded, state['plan_key'])):
+                        raise ValueError('套餐已删除')
+                else:
+                    if context.user_data.get('add_plan_step') != 'groups':
+                        raise ValueError('套餐创建流程已失效')
+                    plan = context.user_data['new_plan']
+                    key = 'p' + os.urandom(6).hex()
+                    db_execute('INSERT INTO plans (key,name,price,usdt_price,days,gb,reset_strategy,group_uuids) VALUES (?,?,?,?,?,?,?,?)',
+                               (key, plan['name'], plan['price'], '', plan['days'], plan['gb'], plan['reset_strategy'], encoded))
+                    context.user_data.pop('add_plan_step', None)
+                    context.user_data.pop('new_plan', None)
+                context.user_data.pop('plan_group_selection', None)
+                await send_or_edit_menu(update, context, f'✅ 套餐已保存，包含 {len(selected)} 个内部组。\n已创建的支付订单不受本次修改影响。',
+                                       InlineKeyboardMarkup([[InlineKeyboardButton('返回套餐管理', callback_data='admin_plans_list')]]), parse_mode=None)
+                return
+        except (PanelApiError, ValueError, TypeError, KeyError, httpx.HTTPError):
+            await send_or_edit_menu(update, context, '⚠️ 保存或刷新失败。请至少选择一个仍存在的内部组，并确认面板连接正常；套餐未保存。',
+                                   InlineKeyboardMarkup([[InlineKeyboardButton('返回选择', callback_data=f'admin_pg_{state["token"]}_view')],
+                                                         [InlineKeyboardButton('取消', callback_data='cancel_op')]]), parse_mode=None)
+            return
+    await show_plan_group_selection(update, context)
+
 
 async def show_plans_menu(update, context):
     plans = db_query("SELECT * FROM plans")
     keyboard = []
     for p in plans:
         p_dict = dict(p)
-        btn_text = f"{p_dict['name']} | ¥{p_dict['price']} / {get_plan_price(p_dict, 'usdt')} | {p_dict['gb']}G"
+        btn_text = f"{p_dict['name']} | ¥{p_dict['price']} | {p_dict['gb']}G"
         keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"plan_detail_{p_dict['key']}")])
     keyboard.append([InlineKeyboardButton("➕ 添加新套餐", callback_data="add_plan_start")])
     keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
@@ -1565,19 +1688,63 @@ async def reschedule_anomaly_job(application, interval_hours):
 
 
 
+async def handle_unpaid_order_deletion(update, context):
+    """Admin-only two-step list deletion, preserving all payment evidence."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_ID:
+        await query.answer("无管理员权限", show_alert=True)
+        return
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回订单列表", callback_data="admin_orders_menu")]])
+    if query.data.startswith('admin_order_delete_apply_'):
+        supplied = query.data.removeprefix('admin_order_delete_apply_')
+        pending = context.user_data.pop('order_delete_confirmation', None)
+        if (not pending or pending['token'] != supplied or pending['actor_id'] != ADMIN_ID
+                or pending['expires_at'] < time.time()):
+            await send_or_edit_menu(update, context, "删除确认已失效，请重新打开订单操作。", back, parse_mode=None)
+            return
+        try:
+            changed = payments.delete_unpaid_order(DB_FILE, pending['order_id'], ADMIN_ID)
+            message = "已删除未支付订单（列表已移除，支付审计保留）。" if changed else "该订单已删除，无需重复操作。"
+        except PaymentError:
+            message = "订单已到账、已进入交付或状态不允许删除，操作已停止。"
+        await send_or_edit_menu(update, context, message, back, parse_mode=None)
+        return
+    order_id = query.data.removeprefix('admin_order_delete_')
+    order = get_order(db_query, order_id)
+    intent = payments.for_business(DB_FILE, order_id)
+    if not payments.can_delete_unpaid(order, intent) or payments.is_order_deleted(DB_FILE, order_id):
+        await send_or_edit_menu(update, context, "仅可删除尚未到账、未进入交付的在线订单。", back, parse_mode=None)
+        return
+    token = os.urandom(12).hex()
+    context.user_data['order_delete_confirmation'] = {'token': token, 'order_id': order_id,
+                                                     'actor_id': ADMIN_ID, 'expires_at': time.time() + 300}
+    text = (f"确认删除未支付订单 {order_id}？\n金额：¥{yuan(intent['amount_fen'])}\n\n"
+            "此操作仅从管理员及用户订单列表移除，不会关闭 ZPAY 网关订单，也不代表网关已确认未付款。\n"
+            "尚未下单的旧收银台将禁止发起付款；已发出的付款链接可能仍可支付。\n"
+            "支付记录和审计会保留；如后来核验到账，将自动恢复订单并继续处理。")
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("确认删除（保留支付审计）", callback_data=f"admin_order_delete_apply_{token}")],
+                                     [InlineKeyboardButton("取消", callback_data=f"admin_order_{order_id}")]])
+    await send_or_edit_menu(update, context, text, keyboard, parse_mode=None)
+
+
 async def show_orders_menu(update, context, status_filter=None, page=0):
     page = max(int(page or 0), 0)
     page_size = 20
     offset = page * page_size
 
-    if status_filter:
-        rows = db_query("SELECT * FROM orders WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?", (status_filter, page_size, offset))
-        total_row = db_query("SELECT COUNT(*) AS c FROM orders WHERE status=?", (status_filter,), one=True)
+    if status_filter == 'deleted':
+        rows = db_query(f"SELECT * FROM orders WHERE NOT ({payments.VISIBLE_ORDER_SQL}) ORDER BY created_at DESC LIMIT ? OFFSET ?", (page_size, offset))
+        total_row = db_query("SELECT COUNT(*) AS c FROM order_deletions", one=True)
+        total = int(total_row['c']) if total_row else 0
+        title = "🗑 **已删除未支付订单（审计保留）**"
+    elif status_filter:
+        rows = db_query(f"SELECT * FROM orders WHERE status = ? AND {payments.VISIBLE_ORDER_SQL} ORDER BY created_at DESC LIMIT ? OFFSET ?", (status_filter, page_size, offset))
+        total_row = db_query(f"SELECT COUNT(*) AS c FROM orders WHERE status=? AND {payments.VISIBLE_ORDER_SQL}", (status_filter,), one=True)
         total = int(total_row['c']) if total_row else 0
         title = f"🧾 **订单审计 - {order_status_label(status_filter)}**"
     else:
-        rows = db_query("SELECT * FROM orders ORDER BY created_at DESC LIMIT ? OFFSET ?", (page_size, offset))
-        total_row = db_query("SELECT COUNT(*) AS c FROM orders", one=True)
+        rows = db_query(f"SELECT * FROM orders WHERE {payments.VISIBLE_ORDER_SQL} ORDER BY created_at DESC LIMIT ? OFFSET ?", (page_size, offset))
+        total_row = db_query(f"SELECT COUNT(*) AS c FROM orders WHERE {payments.VISIBLE_ORDER_SQL}", one=True)
         total = int(total_row['c']) if total_row else 0
         title = "🧾 **订单审计 - 最近订单**"
 
@@ -1596,7 +1763,7 @@ async def show_orders_menu(update, context, status_filter=None, page=0):
         ])
 
     keyboard.append([
-        InlineKeyboardButton("🟡 待审核", callback_data="admin_orders_status_pending"),
+        InlineKeyboardButton("🟡 待付款/待处理", callback_data="admin_orders_status_pending"),
         InlineKeyboardButton("🟠 处理中", callback_data="admin_orders_status_approved"),
     ])
     keyboard.append([
@@ -1612,6 +1779,7 @@ async def show_orders_menu(update, context, status_filter=None, page=0):
         InlineKeyboardButton("🟠 续期后续处理", callback_data="admin_orders_status_extension_applied"),
     ])
 
+    keyboard.append([InlineKeyboardButton("🗑 已删除未支付订单", callback_data="admin_orders_deleted")])
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"admin_orders_page_{status_filter or 'all'}_{page-1}"))
@@ -1644,6 +1812,16 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     await query.answer()
     data = query.data
+    if not data.startswith('admin_order_delete_'):
+        context.user_data.pop('order_delete_confirmation', None)
+    if data.startswith('admin_pg_'):
+        await handle_plan_group_selection(update, context)
+        return
+    if data.startswith('admin_plan_groups_'):
+        await begin_plan_group_selection(update, context, data.removeprefix('admin_plan_groups_'))
+        return
+    if data in {'admin_plans_list', 'cancel_op', 'back_home'}:
+        context.user_data.pop('plan_group_selection', None)
     if not data.startswith('admin_limit_'):
         context.user_data.pop('hwid_limit_user', None)
 
@@ -1996,20 +2174,13 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             lines.append(f"- #{it['id']} | {it['action']} | {it['status']} | {ts}")
         await send_or_edit_menu(update, context, "\n".join(lines), InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
         return
-    if data == "admin_pay_settings":
-        usdt_enabled = get_setting_bool("usdt_enabled", False)
-        msg = (
-            "💳 **收款设置**\n"
-            "🧾 人工审核：始终可用（用户提交凭证后人工审核）\n"
-            f"🟨 USDT：{'已开启' if usdt_enabled else '已关闭'}\n\n"
-            "请选择下方配置项。"
-        )
-        kb = [
-            [InlineKeyboardButton("🟨 USDT 配置", callback_data="admin_pay_usdt_cfg")],
-            [InlineKeyboardButton("🧪 支付设置自检", callback_data="admin_pay_self_check")],
-            [InlineKeyboardButton("🔙 返回", callback_data="back_home")],
-        ]
-        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb))
+    if data in {"admin_pay_settings", "admin_pay_self_check"}:
+        msg = ("💳 收款设置\n"
+               f"支付宝在线支付：{'已配置' if payment_config_ready() else '尚未配置'}\n"
+               "付款成功后自动开通／续费。\n"
+               "USDT 和人工审核入口暂时隐藏，历史订单保留。\n"
+               "密钥、回调域名及可信反代通过服务器 .env 配置。")
+        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_home")]]))
         return
 
     if data == "admin_pay_usdt_cfg":
@@ -2107,7 +2278,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"{preview}\n"
             "```\n\n"
             f"最近回滚点：`{latest_text}`\n"
-            "仅可提交 Remnawave 3.4.4 契约定义的字段。"
+            f"仅可提交 Remnawave {PANEL_TARGET_VERSION} 契约定义的字段。"
         )
         kb = [
             [InlineKeyboardButton("✍️ 修改订阅设置(JSON)", callback_data="admin_subscription_settings_edit")],
@@ -2376,6 +2547,12 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         tip = "第一行输入流量GB（例如 200），从第二行开始输入面板用户 ID 列表。"
         await send_or_edit_menu(update, context, f"✍️ 批量改流量包\n{tip}", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 取消", callback_data="admin_bulk_menu")]]))
         return
+    if data.startswith('admin_order_delete_'):
+        await handle_unpaid_order_deletion(update, context)
+        return
+    if data == 'admin_orders_deleted':
+        await show_orders_menu(update, context, status_filter='deleted')
+        return
     if data == "admin_orders_menu":
         await show_orders_menu(update, context)
         return
@@ -2401,13 +2578,22 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         item = dict(order)
         logs = db_query("SELECT * FROM order_audit_logs WHERE order_id=? ORDER BY created_at DESC LIMIT 5", (item['order_id'],))
         txt = format_order_detail(item, [dict(x) for x in logs])
+        intent = payments.for_business(DB_FILE, order_id)
+        if intent:
+            txt += (f"\n\n支付宝支付：{'已到账' if intent['status'] == 'paid' else '待付款/待核对'}"
+                    f"\n商户支付单号：`{intent['payment_id']}`\n金额：¥{yuan(intent['amount_fen'])}")
         kb = [[InlineKeyboardButton("🔙 返回", callback_data="admin_orders_menu")]]
-        if item.get('status') == STATUS_PENDING:
+        deleted = payments.is_order_deleted(DB_FILE, order_id)
+        if deleted:
+            txt += "\n\n🗑 已从订单列表删除（仅本地删除，支付审计保留；核验到账后自动恢复）。"
+        elif payments.can_delete_unpaid(item, intent):
+            kb.insert(0, [InlineKeyboardButton("🗑 删除未支付订单", callback_data=f"admin_order_delete_{order_id}")])
+        if item.get('status') == STATUS_PENDING and not intent:
             kb.insert(0, [InlineKeyboardButton("✅ 通过", callback_data=f"ap_{item['order_id']}_0"),
                           InlineKeyboardButton("❌ 拒绝", callback_data=f"rj_{item['order_id']}")])
         elif item.get('status') == STATUS_FAILED and safe_to_retry_order(item):
             kb.insert(0, [InlineKeyboardButton("♻️ 重试发货", callback_data=f"rt_{item['order_id']}")])
-        if item.get('status') in (STATUS_PENDING, STATUS_FAILED) and (item.get('status') == STATUS_PENDING or safe_to_retry_order(item)):
+        if not intent and item.get('status') in (STATUS_PENDING, STATUS_FAILED) and (item.get('status') == STATUS_PENDING or safe_to_retry_order(item)):
             kb.insert(0, [InlineKeyboardButton("🚫 取消订单", callback_data=f"order_cancel_confirm_{item['order_id']}")])
         if item.get('status') in (STATUS_APPROVED, STATUS_UNKNOWN, STATUS_EXTENSION_APPLIED, STATUS_FAILED):
             kb.insert(0, [InlineKeyboardButton("🔎 重新核对", callback_data=f"admin_order_{item['order_id']}")])
@@ -2448,8 +2634,18 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except Exception as exc:
             logger.warning("failed to read plan strategy for %s: %s", key, exc)
             s_text = '总流量'
-        msg = f"📦 **套餐详情**\n\n🏷 名称：`{p_dict['name']}`\n💰 人民币：`{p_dict['price']}`\n🪙 USDT：`{(p_dict.get('usdt_price') or '未设置')} USDT`\n⏳ 时长：`{p_dict['days']} 天`\n📡 流量：`{p_dict['gb']} GB`\n🔄 策略：`{s_text}`"
-        keyboard = [[InlineKeyboardButton("🗑 删除此套餐", callback_data=f"del_plan_{key}")], [InlineKeyboardButton("🔙 返回列表", callback_data="admin_plans_list")]]
+        msg = f"📦 **套餐详情**\n\n🏷 名称：`{p_dict['name']}`\n💰 人民币：`{p_dict['price']}`\n⏳ 时长：`{p_dict['days']} 天`\n📡 流量：`{p_dict['gb']} GB`\n🔄 策略：`{s_text}`"
+        try:
+            assigned = plan_groups(p_dict, TARGET_GROUP_UUID)
+            group_text = '\n'.join(assigned[:40]) or '未配置'
+            if len(assigned) > 40:
+                group_text += f'\n…共 {len(assigned)} 个组，完整列表请进入选择界面查看。'
+        except (ValueError, TypeError):
+            group_text = '配置无效，请重新选择'
+        msg += f"\n\n内部组 UUID：\n{group_text}"
+        if p_dict.get('group_uuids') is None:
+            msg += "\n（旧套餐：使用默认组；建议改为独立选择）"
+        keyboard = [[InlineKeyboardButton("🧩 选择内部组", callback_data=f"admin_plan_groups_{key}")], [InlineKeyboardButton("🗑 删除此套餐", callback_data=f"del_plan_{key}")], [InlineKeyboardButton("🔙 返回列表", callback_data="admin_plans_list")]]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
     elif data.startswith("del_plan_"):
         key = data.split("_")[2]
@@ -2599,21 +2795,12 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data['setting_anomaly_threshold'] = True
     elif data.startswith("set_strategy_"):
         strategy = data.replace("set_strategy_", "")
-        new_plan = context.user_data['new_plan']
-        key = f"p{int(time.time())}"
-        db_execute("INSERT INTO plans (key, name, price, usdt_price, days, gb, reset_strategy) VALUES (?, ?, ?, ?, ?, ?, ?)", (key, new_plan['name'], new_plan['price'], new_plan['usdt_price'], new_plan['days'], new_plan['gb'], strategy))
-        del context.user_data['add_plan_step']
-        strategy_label = get_strategy_label(strategy)
-        msg = (
-            "✅ 套餐添加成功！\n"
-            f"套餐名称：{new_plan['name']}\n"
-            f"重置策略：{strategy_label} ({strategy})"
-        )
-        kb = [
-            [InlineKeyboardButton("📦 返回套餐管理", callback_data="admin_plans_list")],
-            [InlineKeyboardButton("🏠 返回主菜单", callback_data="back_home")],
-        ]
-        await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(kb), parse_mode=None)
+        if strategy not in {'NO_RESET', 'DAY', 'WEEK', 'MONTH', 'MONTH_ROLLING'} or context.user_data.get('add_plan_step') != 'strategy':
+            await send_or_edit_menu(update, context, '⚠️ 创建流程已失效，请重新添加套餐。', parse_mode=None)
+            return
+        context.user_data['new_plan']['reset_strategy'] = strategy
+        context.user_data['add_plan_step'] = 'groups'
+        await begin_plan_group_selection(update, context)
 
 async def show_users_list(update, context):
     users = db_query("SELECT DISTINCT tg_id, MAX(created_at) as created_at FROM subscriptions GROUP BY tg_id ORDER BY created_at DESC LIMIT 20")
@@ -3063,32 +3250,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id == ADMIN_ID and 'add_plan_step' in context.user_data and text:
         step = context.user_data['add_plan_step']
         if step == 'name':
-            context.user_data['new_plan'] = {'name': text}
+            if not text.strip() or len(text.strip()) > 90:
+                return await update.message.reply_text('❌ 套餐名称须为 1–90 个字符', reply_markup=cancel_kb)
+            context.user_data['new_plan'] = {'name': text.strip(), 'usdt_price': ''}
             context.user_data['add_plan_step'] = 'price'
             await update.message.reply_text("📝 **步骤 2/6：请输入人民币价格**\n(例如: 200元)", reply_markup=cancel_kb, parse_mode='Markdown')
         elif step == 'price':
-            context.user_data['new_plan']['price'] = text
-            context.user_data['add_plan_step'] = 'usdt_price'
-            await update.message.reply_text("🪙 **步骤 3/6：请输入 USDT 价格**\n(例如: 28)", reply_markup=cancel_kb, parse_mode='Markdown')
-        elif step == 'usdt_price':
-            if not text or not text.strip():
-                return await update.message.reply_text("❌ USDT 价格不能为空", reply_markup=cancel_kb)
-            context.user_data['new_plan']['usdt_price'] = text.strip()
+            try:
+                amount = money_fen(text, display=True)
+            except PaymentError:
+                return await update.message.reply_text('❌ 请输入大于零、最多两位小数的人民币价格，例如 200.00', reply_markup=cancel_kb)
+            context.user_data['new_plan']['price'] = yuan(amount)
             context.user_data['add_plan_step'] = 'days'
-            await update.message.reply_text("📅 **步骤 4/6：请输入有效期天数**\n(请输入纯数字，例如: 30)", reply_markup=cancel_kb, parse_mode='Markdown')
+            await update.message.reply_text("📅 **步骤 3/6：请输入有效期天数**\n(请输入正整数，例如: 30)", reply_markup=cancel_kb, parse_mode='Markdown')
         elif step == 'days':
-            if not text.isdigit(): return await update.message.reply_text("❌ 请输入数字", reply_markup=cancel_kb)
+            if not text.isdigit() or int(text) < 1: return await update.message.reply_text("❌ 请输入数字", reply_markup=cancel_kb)
             context.user_data['new_plan']['days'] = int(text)
             context.user_data['add_plan_step'] = 'gb'
-            await update.message.reply_text("📡 **步骤 5/6：请输入流量限制 GB**\n(请输入纯数字，例如: 100)", reply_markup=cancel_kb, parse_mode='Markdown')
+            await update.message.reply_text("📡 **步骤 4/6：请输入流量限制 GB**\n(请输入纯数字，例如: 100)", reply_markup=cancel_kb, parse_mode='Markdown')
         elif step == 'gb':
             if not text.isdigit(): return await update.message.reply_text("❌ 请输入数字", reply_markup=cancel_kb)
             context.user_data['new_plan']['gb'] = int(text)
+            context.user_data['add_plan_step'] = 'strategy'
             keyboard = [[InlineKeyboardButton("🚫 永不重置", callback_data="set_strategy_NO_RESET")], [InlineKeyboardButton("📅 每日重置", callback_data="set_strategy_DAY")], [InlineKeyboardButton("🗓 每周重置", callback_data="set_strategy_WEEK")], [InlineKeyboardButton("🌝 每月重置", callback_data="set_strategy_MONTH")], [InlineKeyboardButton("🌙 按开通日每月重置", callback_data="set_strategy_MONTH_ROLLING")], [InlineKeyboardButton("❌ 取消", callback_data="cancel_op")]]
-            await update.message.reply_text("🔄 **步骤 6/6：请选择流量重置策略**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+            await update.message.reply_text("🔄 **步骤 5/6：请选择流量重置策略**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
         return
     pending_order = get_pending_order_for_user(db_query, user_id)
-    if pending_order:
+    if pending_order and not payments.for_business(DB_FILE, pending_order["order_id"]):
         logger.info("user message routed to pending-order proof: user=%s order=%s", user_id, pending_order.get('order_id'))
         awaiting_order_id = context.user_data.get('awaiting_manual_review_proof_order_id')
         if awaiting_order_id and awaiting_order_id != pending_order['order_id']:
@@ -3119,6 +3307,7 @@ async def add_plan_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("无管理员权限", show_alert=True)
         return
     await query.answer()
+    context.user_data.pop('plan_group_selection', None)
     context.user_data['add_plan_step'] = 'name'
     await send_or_edit_menu(update, context, "📝 **步骤 1/6：开始添加套餐**\n\n请输入套餐名称:",
                             InlineKeyboardMarkup([[InlineKeyboardButton("❌ 取消", callback_data="cancel_op")]]))
@@ -3151,6 +3340,10 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = ('cancel' if data.startswith('order_cancel_') else data.split('_', 1)[0])
     initial_order = get_order(db_query, order_id_for_log)
     previous_status = initial_order.get('status') if initial_order else 'missing'
+    if (action in {'cancel', 'rj'} and initial_order
+            and payments.for_business(DB_FILE, initial_order['order_id'])):
+        await context.bot.send_message(ADMIN_ID, "在线支付单不能直接取消／拒绝，请先核对网关付款和交付结果。")
+        return
     message_kind = callback_message_kind(getattr(query, 'message', None))
     client_return_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]])
     admin_return_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]])
@@ -3263,7 +3456,37 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not data.startswith("ap_"):
         return
 
-    _, order_id, short_id = data.split("_", 2)
+    _, order_id, _ = data.split("_", 2)
+    await fulfill_subscription_order(order_id, context, actor_id=query.from_user.id,
+                                     update_ui=update_ui, clean_user_waiting_msg=clean_user_waiting_msg)
+
+
+_delivery_locks = defaultdict(asyncio.Lock)
+
+
+async def fulfill_subscription_order(order_id, context, *, actor_id=0, update_ui=None, clean_user_waiting_msg=None):
+    order = get_order(db_query, order_id)
+    if not order:
+        return
+    # Serialize different renewal orders for the same Panel user in this bot process.
+    key = ('user', order.get('target_user_id')) if order['order_type'] == 'renew' else ('order', order_id)
+    async with _delivery_locks[key]:
+        await _fulfill_subscription_order(order_id, context, actor_id=actor_id,
+                                         update_ui=update_ui, clean_user_waiting_msg=clean_user_waiting_msg)
+
+
+async def _fulfill_subscription_order(order_id, context, *, actor_id=0, update_ui=None, clean_user_waiting_msg=None):
+    client_return_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")]])
+    admin_return_btn = client_return_btn
+    if update_ui is None:
+        async def update_ui(content, reply_markup=None):
+            try:
+                await context.bot.send_message(ADMIN_ID, f"在线支付订单 {order_id}\n{content}")
+            except TelegramError:
+                logger.warning('payment admin notice failed order_id=%s', order_id)
+    if clean_user_waiting_msg is None:
+        async def clean_user_waiting_msg(order):
+            return
     order = get_order(db_query, order_id)
     if not order:
         await update_ui("⚠️ 订单不存在或已过期", reply_markup=admin_return_btn)
@@ -3275,6 +3498,11 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if order.get('status') != STATUS_PENDING:
         await update_ui(f"⚠️ 当前订单状态不可处理: {order.get('status')}", reply_markup=admin_return_btn)
+        return
+
+    intent = payments.for_business(DB_FILE, order_id)
+    if intent and intent['status'] != 'paid':
+        await update_ui("⚠️ 网关尚未确认付款，禁止交付。", reply_markup=admin_return_btn)
         return
 
     claimed = update_order_status(db_execute, order_id, [STATUS_PENDING], STATUS_APPROVED)
@@ -3292,16 +3520,21 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_ui("⚠️ 旧订阅尚未完成数值用户 ID 迁移，请先联系管理员绑定。", reply_markup=admin_return_btn)
         return
 
-    plan = db_query("SELECT * FROM plans WHERE key = ?", (plan_key,), one=True)
+    intent = payments.for_business(DB_FILE, order_id)
+    plan = json.loads(intent['snapshot_json']) if intent else db_query("SELECT * FROM plans WHERE key = ?", (plan_key,), one=True)
     if not plan:
         update_order_status(db_execute, order_id, [STATUS_APPROVED], STATUS_FAILED, error_message='reason:business_validation|plan_deleted')
         await update_ui("❌ 套餐已删除", reply_markup=admin_return_btn)
         return
 
-    if not panel_config_ready() or (order_type == 'new' and not TARGET_GROUP_UUID):
+    try:
+        delivery_groups = snapshot_groups(plan) if intent else plan_groups(plan, TARGET_GROUP_UUID)
+    except (ValueError, TypeError):
+        delivery_groups = []
+    if not panel_config_ready() or (order_type == 'new' and not delivery_groups) or (dict(plan).get('group_uuids') is not None and not delivery_groups):
         update_order_status(db_execute, order_id, [STATUS_APPROVED], STATUS_FAILED,
                             error_message='panel_configuration_incomplete')
-        await update_ui("⚠️ 面板地址、Token 或新购所需默认内部组尚未配置。", reply_markup=admin_return_btn)
+        await update_ui("⚠️ 面板地址、Token 或套餐内部组尚未配置。", reply_markup=admin_return_btn)
         return
 
     await update_ui("🔄 处理中...")
@@ -3314,6 +3547,8 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     extension_started = False
     creation_started = False
     try:
+        if dict(plan).get('group_uuids') is not None:
+            require_available(delivery_groups, await get_internal_squads())
         if order_type == 'renew':
             if not target_user_id:
                 update_order_status(db_execute, order_id, [STATUS_APPROVED], STATUS_FAILED, error_message='reason:business_validation|missing_target_uuid')
@@ -3345,6 +3580,8 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "trafficLimitBytes": new_limit,
                 "trafficLimitStrategy": reset_strategy,
             }
+            if dict(plan).get('group_uuids') is not None:
+                update_payload["activeInternalSquads"] = delivery_groups
             r = await patch_panel_user(update_payload, retry=False)
             if r.status_code == 200:
                 refreshed = await get_panel_user(target_user_id)
@@ -3353,7 +3590,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not update_order_status(db_execute, order_id, [STATUS_EXTENSION_APPLIED], STATUS_DELIVERED,
                                            delivered_user_id=target_user_id):
                     raise RuntimeError('Could not persist delivered renewal state')
-                append_order_audit_log(db_execute, order_id, 'deliver_success', query.from_user.id, 'renew')
+                append_order_audit_log(db_execute, order_id, 'deliver_success', actor_id, 'renew')
                 try:
                     await sync_user_metadata(target_user_id, uid, plan_key=plan_key, order_id=order_id)
                 except Exception as exc:
@@ -3377,7 +3614,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "trafficLimitBytes": add_traffic,
                 "trafficLimitStrategy": reset_strategy,
                 "expireAt": expire_iso,
-                "activeInternalSquads": [TARGET_GROUP_UUID],
+                "activeInternalSquads": delivery_groups,
             }
             if existing_panel_user:
                 r = None
@@ -3399,7 +3636,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not update_order_status(db_execute, order_id, [STATUS_APPROVED], STATUS_DELIVERED,
                                            delivered_user_id=panel_user_id):
                     raise RuntimeError('Could not persist delivered new-order state')
-                append_order_audit_log(db_execute, order_id, 'deliver_success', query.from_user.id, 'new')
+                append_order_audit_log(db_execute, order_id, 'deliver_success', actor_id, 'new')
                 try:
                     await sync_user_metadata(panel_user_id, uid, plan_key=plan_key, order_id=order_id)
                 except Exception as exc:
@@ -3440,10 +3677,35 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 STATUS_UNKNOWN, error_message=detail)
         else:
             update_order_status(db_execute, order_id, [STATUS_APPROVED], STATUS_FAILED, error_message=detail)
-        append_order_audit_log(db_execute, order_id, 'deliver_failed', query.from_user.id, detail)
+        append_order_audit_log(db_execute, order_id, 'deliver_failed', actor_id, detail)
         await update_ui(
             '⚠️ Panel 写入结果不确定，请人工核对，禁止重复审核。' if extension_started or creation_started
             else '❌ 订单处理失败，请查看服务日志。', reply_markup=admin_return_btn)
+
+async def process_paid_orders_job(context: ContextTypes.DEFAULT_TYPE):
+    # Deliver committed receipts first, even if the merchant API is down/unconfigured.
+    paid = db_query("""SELECT o.order_id FROM orders o JOIN payment_intents p
+        ON p.product_kind='subscription' AND p.business_id=o.order_id
+        WHERE p.status='paid' AND o.status='pending' ORDER BY p.paid_at LIMIT 20""")
+    for row in paid:
+        await fulfill_subscription_order(row['order_id'], context)
+    if not payment_config_ready():
+        return
+    cfg = ZPayConfig.from_env()
+    rows = db_query("""SELECT payment_id FROM payment_intents
+        WHERE status IN ('creating','ready','unknown','redirected') AND last_checked_at<=?
+        ORDER BY last_checked_at LIMIT 10""", (int(time.time()) - 60,))
+    gate = asyncio.Semaphore(3)
+    async with httpx.AsyncClient(trust_env=False) as http:
+        client = ZPayClient(cfg, http)
+        async def check(row):
+            async with gate:
+                try:
+                    await reconcile_payment(DB_FILE, row['payment_id'], cfg, client)
+                except PaymentError:
+                    logger.warning('payment query not confirmed')
+        await asyncio.gather(*(check(row) for row in rows))
+
 
 async def process_bulk_jobs_job(context: ContextTypes.DEFAULT_TYPE):
     rows = db_query(
@@ -3796,10 +4058,11 @@ if __name__ == '__main__':
         logger.warning("Invalid anomaly interval; using one hour: %s", exc)
     app.job_queue.run_repeating(check_anomalies_job, interval=anomaly_interval_seconds, first=60, name='check_anomalies_job')
     app.job_queue.run_repeating(process_bulk_jobs_job, interval=30, first=10, name='process_bulk_jobs_job')
+    app.job_queue.run_repeating(process_paid_orders_job, interval=10, first=5, name='process_paid_orders_job')
     app.job_queue.run_repeating(reconcile_legacy_subscriptions_job, interval=3600, first=20, name='reconcile_legacy_subscriptions_job')
 
     if panel_config_ready():
         app.job_queue.run_once(warmup_panel_runtime_job, when=5, name='warmup_panel_runtime_job')
 
-    print(f"🚀 RemnaShop-Pro {APP_VERSION} 已启动 | 监听中...")
+    print(f"🚀 RemnaShop-Pro {APP_VERSION} 已启动 | Remnawave {PANEL_TARGET_VERSION} | 监听中...")
     app.run_polling()

@@ -66,13 +66,13 @@ cmd_update() {
 
 cmd_restart() {
   require_docker
-  ${COMPOSE} restart remnashop
+  ${COMPOSE} restart remnashop http
   ${COMPOSE} ps
 }
 
 cmd_logs() {
   require_docker
-  ${COMPOSE} logs -f remnashop
+  ${COMPOSE} logs -f remnashop http
 }
 
 cmd_ps() {
@@ -89,7 +89,7 @@ require_stopped_service() {
   local running
   running="$(docker ps -q --filter "volume=${VOLUME_NAME}")"
   if [ -n "${running}" ]; then
-    echo "[err] 项目数据卷仍被运行中的容器使用。请先执行 docker compose -p remnashop stop remnashop。"
+    echo "[err] 项目数据卷仍被运行中的容器使用。请先执行 docker compose -p remnashop stop remnashop http。"
     exit 1
   fi
 }

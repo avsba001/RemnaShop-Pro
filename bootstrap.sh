@@ -26,7 +26,9 @@ err() {
 usage() {
   cat <<USAGE
 用法:
-  bash bootstrap.sh install
+  bash bootstrap.sh install [--no-start] [--local-source]
+  # --no-start：只准备配置并构建镜像，不启动服务，不要求立即填写 Bot 配置
+  # --local-source：使用已校验目录中的本地源码，不拉取或覆盖工作区
   bash bootstrap.sh uninstall
   bash bootstrap.sh              # 有 TTY 时显示交互菜单；否则默认执行 install
 
@@ -205,6 +207,14 @@ install_docker_compose() {
 }
 
 prepare_repo() {
+  if [ "${USE_LOCAL_SOURCE:-0}" -eq 1 ]; then
+    if ! verified_install_dir; then
+      err "本地源码目录未通过项目仓库校验，已停止。"
+      return 1
+    fi
+    log "使用已校验的本地源码目录，不执行 Git 更新：${INSTALL_DIR}"
+    return 0
+  fi
   log "正在准备仓库目录：${INSTALL_DIR}"
   log "说明：安装目录会保留完整 git 仓库（含 docs/tests/README 等文件）；这些文件是否进入生产镜像由 Dockerfile + .dockerignore 决定。"
   case "${INSTALL_DIR%/}" in
@@ -250,7 +260,8 @@ prepare_env() {
   cd "${INSTALL_DIR}"
 
   if [ ! -f .env ] && [ -f .env.example ]; then
-    cp .env.example .env
+    # Source archives may be prepared on Windows; do not copy CR into values.
+    sed 's/\r$//' .env.example > .env
     log "已根据 .env.example 创建 .env"
   elif [ -f .env ]; then
     log ".env 已存在，将保留现有配置并仅处理必填项。"
@@ -293,7 +304,8 @@ prompt_required_env() {
   local admin_current bot_current admin_new bot_new keep
   admin_current="$(get_env_value "ADMIN_ID")"
   bot_current="$(get_env_value "BOT_TOKEN")"
-  if [ ! -r /dev/tty ]; then
+  # /dev/tty may exist and be readable without a controlling terminal (SSH exec).
+  if [ ! -r /dev/tty ] || ! ( : </dev/tty ) 2>/dev/null; then
     if valid_admin_id "${admin_current}" && valid_bot_token "${bot_current}"; then
       log "非交互安装：已检测到 .env 中配置的 ADMIN_ID 和 BOT_TOKEN。"
       return
@@ -375,52 +387,50 @@ start_stack() {
 print_failure_hint() {
   cat <<MSG
 
-❌ 安装失败：remnashop 容器未进入 healthy 状态。
+❌ 安装失败：remnashop / http 服务栈未全部进入 healthy 状态。
 排查建议：
   cd ${INSTALL_DIR}
   docker compose -p ${PROJECT_NAME} ps
-  docker compose -p ${PROJECT_NAME} logs --tail=200 remnashop
+  docker compose -p ${PROJECT_NAME} logs --tail=200 remnashop http
 
 MSG
 }
 
 wait_for_health() {
   cd "${INSTALL_DIR}"
-
   local timeout="${HEALTH_TIMEOUT_SECONDS:-300}"
-  local elapsed=0
-  local interval=5
-  local container_id state health restart_count
-
+  local elapsed=0 interval=5
+  local container_id state health restart_count service all_healthy
   while [ "${elapsed}" -lt "${timeout}" ]; do
-    container_id="$(docker compose -p "${PROJECT_NAME}" ps -q remnashop || true)"
-    if [ -z "${container_id}" ]; then
-      err "未找到 remnashop 容器。"
-      print_failure_hint
-      return 1
-    fi
-
-    state="$(docker inspect --format='{{.State.Status}}' "${container_id}" 2>/dev/null || echo "unknown")"
-    health="$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "${container_id}" 2>/dev/null || echo "unknown")"
-    restart_count="$(docker inspect --format='{{.RestartCount}}' "${container_id}" 2>/dev/null || echo "0")"
-
-    if [ "${state}" = "running" ] && [ "${health}" = "healthy" ]; then
-      log "remnashop 容器已进入 healthy 状态。"
+    all_healthy=1
+    for service in remnashop http; do
+      container_id="$(docker compose -p "${PROJECT_NAME}" ps -q "${service}" || true)"
+      if [ -z "${container_id}" ]; then
+        err "未找到 ${service} 容器。"
+        print_failure_hint
+        return 1
+      fi
+      state="$(docker inspect --format='{{.State.Status}}' "${container_id}" 2>/dev/null || echo "unknown")"
+      health="$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "${container_id}" 2>/dev/null || echo "unknown")"
+      restart_count="$(docker inspect --format='{{.RestartCount}}' "${container_id}" 2>/dev/null || echo "0")"
+      if [ "${state}" = "exited" ] || [ "${state}" = "dead" ] || [ "${health}" = "unhealthy" ] || [ "${state}" = "restarting" ] || [ "${restart_count}" -gt 3 ]; then
+        err "${service} 容器状态异常（state=${state}, health=${health}, restarts=${restart_count}）。"
+        print_failure_hint
+        return 1
+      fi
+      if [ "${state}" != "running" ] || [ "${health}" != "healthy" ]; then
+        all_healthy=0
+        echo "[等待中] ${service} state=${state}, health=${health} (${elapsed}s/${timeout}s)"
+      fi
+    done
+    if [ "${all_healthy}" -eq 1 ]; then
+      log "remnashop 和 http 容器均已进入 healthy 状态。"
       return 0
     fi
-
-    if [ "${state}" = "exited" ] || [ "${state}" = "dead" ] || [ "${health}" = "unhealthy" ] || [ "${state}" = "restarting" ] || [ "${restart_count}" -gt 3 ]; then
-      err "容器状态异常，判定安装失败（state=${state}, health=${health}, restarts=${restart_count}）。"
-      print_failure_hint
-      return 1
-    fi
-
-    echo "[等待中] remnashop state=${state}, health=${health}, restarts=${restart_count} (${elapsed}s/${timeout}s)"
     sleep "${interval}"
     elapsed=$((elapsed + interval))
   done
-
-  err "等待超时：${timeout}s 内 remnashop 容器仍未达到 healthy。"
+  err "等待超时：${timeout}s 内服务栈未全部达到 healthy。"
   print_failure_hint
   return 1
 }
@@ -557,6 +567,21 @@ install_flow() {
   install_docker_compose
   prepare_repo
   prepare_env
+  if [ "${NO_START:-0}" -eq 1 ]; then
+    chmod 600 "${INSTALL_DIR}/.env"
+    cd "${INSTALL_DIR}"
+    if [ -n "$(docker ps -q --filter "label=com.docker.compose.project=${PROJECT_NAME}")" ]; then
+      err "该项目存在运行中的容器，拒绝将本次操作报告为未启动部署；未停止现有容器。"
+      return 1
+    fi
+    log "仅准备模式：校验 Compose 配置并构建镜像，不创建或启动应用容器。"
+    docker compose -p "${PROJECT_NAME}" config --quiet
+    docker compose -p "${PROJECT_NAME}" build
+    log "部署准备完成，服务未启动；这不是运行健康验收通过。"
+    log "请编辑 ${INSTALL_DIR}/.env 填写 Bot、Panel 和支付配置。"
+    log "填写完成后执行：REPO_URL='${REPO_URL}' bash ${INSTALL_DIR}/bootstrap.sh install --local-source"
+    return 0
+  fi
   prompt_required_env
   start_stack
   wait_for_health
@@ -644,6 +669,21 @@ select_action() {
 main() {
   need_sudo
   select_action "${1:-}"
+  NO_START=0
+  USE_LOCAL_SOURCE=0
+  if [ "$#" -gt 0 ]; then shift; fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --no-start) NO_START=1 ;;
+      --local-source) USE_LOCAL_SOURCE=1 ;;
+      *) err "未知选项：$1"; return 1 ;;
+    esac
+    shift
+  done
+  if [ "${ACTION}" != "install" ] && { [ "${NO_START}" -eq 1 ] || [ "${USE_LOCAL_SOURCE}" -eq 1 ]; }; then
+    err "--no-start 和 --local-source 仅适用于 install。"
+    return 1
+  fi
 
   if [ "${ACTION}" = "install" ]; then
     install_flow

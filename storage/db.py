@@ -30,11 +30,14 @@ def init_db(db_file: str) -> None:
         raise
     finally:
         conn.close()
+    from storage.payments import init_payments
+    init_payments(db_file)
 
 
 def _init_db_on_connection(conn: sqlite3.Connection) -> None:
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS plans (key TEXT PRIMARY KEY, name TEXT, price TEXT, usdt_price TEXT, days INTEGER, gb INTEGER, reset_strategy TEXT)''')
+    _add_column(conn, "plans", "group_uuids", "TEXT")
     c.execute('''CREATE TABLE IF NOT EXISTS subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER, uuid TEXT, created_at TIMESTAMP)''')
     _add_column(conn, "subscriptions", "user_id", "INTEGER")
     _add_column(conn, "subscriptions", "migration_status", "TEXT")
@@ -205,21 +208,22 @@ def _init_db_on_connection(conn: sqlite3.Connection) -> None:
 
 def db_query(db_file: str, query: str, args: Iterable[Any] = (), one: bool = False):
     conn = _connect(db_file)
-    cur = conn.cursor()
-    cur.execute(query, tuple(args))
-    rv = cur.fetchall()
-    conn.close()
-    return (rv[0] if rv else None) if one else rv
+    try:
+        cur = conn.execute(query, tuple(args))
+        rv = cur.fetchall()
+        return (rv[0] if rv else None) if one else rv
+    finally:
+        conn.close()
 
 
 def db_execute(db_file: str, query: str, args: Iterable[Any] = ()) -> int:
     conn = _connect(db_file)
-    cur = conn.cursor()
-    cur.execute(query, tuple(args))
-    conn.commit()
-    changed = cur.rowcount
-    conn.close()
-    return changed
+    try:
+        cur = conn.execute(query, tuple(args))
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
 
 
 def bind_legacy_subscription(db_file: str, subscription_id: int, user_id: int, tg_id: int) -> None:

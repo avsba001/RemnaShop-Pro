@@ -8,6 +8,8 @@ from typing import Any, Optional
 
 import httpx
 
+from utils.constants import PANEL_TARGET_VERSION
+
 logger = logging.getLogger(__name__)
 
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
@@ -74,7 +76,7 @@ def api_base_url(panel_url: str) -> str:
 
 def require_user_id(value) -> int:
     if isinstance(value, bool) or not str(value).isdigit() or int(value) <= 0:
-        raise ValueError("Remnawave 3.4.4 requires a positive numeric userId")
+        raise ValueError(f"Remnawave {PANEL_TARGET_VERSION} requires a positive numeric userId")
     return int(value)
 
 
@@ -192,8 +194,10 @@ async def safe_api_request(method, endpoint, panel_url, headers, verify_tls=True
         raise PanelApiError("Panel token is not configured")
     url = f"{panel_url.rstrip('/')}{endpoint}"
     client = _get_client(verify_tls)
-    # Non-idempotent actions opt out: a lost response must not replay a write.
-    max_attempts = 3 if retry else 1
+    # A lost response does not prove that Panel rejected a write. Never replay
+    # POST/PUT/PATCH/DELETE at the HTTP layer, even when retry=True. Safe bulk
+    # state assignments may be retried explicitly by the persisted job worker.
+    max_attempts = 3 if retry and method.upper() in {'GET', 'HEAD', 'OPTIONS'} else 1
 
     for attempt in range(1, max_attempts + 1):
         resp = None
@@ -419,7 +423,7 @@ async def run_bulk_action(action, user_ids, extra, panel_url, headers, verify_tl
 
 
 async def get_contract_capabilities(panel_url, headers, verify_tls=True):
-    # These capabilities are locked by the 3.4.4 contract. Mutating endpoints
+    # These capabilities are locked by the vendored Panel contract. Mutating endpoints
     # must never be probed with invalid empty requests.
     return {"metadata": True, "connections_drop": True}
 

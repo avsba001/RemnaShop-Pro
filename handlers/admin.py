@@ -1,7 +1,7 @@
 import datetime
 
 STATUS_CN = {
-    'pending': '待审核',
+    'pending': '待付款/待处理',
     'approved': '已通过(处理中)',
     'rejected': '已拒绝',
     'delivered': '已发货',

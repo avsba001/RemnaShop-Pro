@@ -10,7 +10,7 @@ This repository must support exactly one deployment method: Docker Compose.
 - The bootstrap script is the single entrypoint for install/uninstall workflows.
 
 ## API source of truth
-The supported Remnawave target is Panel **3.4.4**, with official
+The supported Remnawave target is Panel **3.4.8**, with official
 `@remnawave/backend-contract` **3.4.15**. Use the vendored
 `docs/remnawave-openapi.json` for all runtime API work. Its provenance and
 checksums are recorded in `docs/remnawave-contract-source.md`.
@@ -24,6 +24,7 @@ inventory, and contract tests together.
 - Do not invent endpoints.
 - Do not invent request fields, response fields, query parameters, path parameters, or callback payloads.
 - Do not guess API behavior when the OpenAPI document is unclear.
+- Never automatically retry mutating HTTP requests after network errors or retryable status codes. A missing response does not prove the write failed; only explicitly safe persisted job operations may be retried at the business layer.
 - Do not probe guessed routes or fields as compatibility fallbacks. Supporting
   multiple Panel versions requires an explicit, tested version capability design.
 - If the current code conflicts with `docs/remnawave-openapi.json`, update the code to match the OpenAPI document.
@@ -177,3 +178,19 @@ When making changes, clearly report:
 - what behavior changed
 - what validation was performed
 - any remaining configuration issues that still require manual action
+
+## Payment and HTTP rules
+
+- Keep HTTP in the same Docker Compose stack as a separate `http` service.
+- Installation succeeds only when both `remnashop` and `http` are healthy.
+- HTTP startup/health must never call Bot crash recovery or import bot.py.
+- Use the user-provided ZPAY contract summarized in docs/zpay-payments.md.
+- Freeze CNY amount/product snapshots server-side. Never trust callback amounts alone.
+- Commit verified paid receipts before replying success; fulfill asynchronously.
+- Only verified paid online orders may be fulfilled, including admin approvals.
+- Never automatically replay gateway creation or uncertain Panel writes.
+- Do not invent gateway close/expiry/refund behavior absent from the contract.
+- Hide new manual/USDT purchases and prices, preserving historical records.
+- Treat checkout URLs, callback queries and merchant keys as sensitive; no access logs.
+- Trust forwarding headers only from configured proxies; never fake a Telegram user's IP.
+- Backups/restores require both Bot and HTTP database writers to be stopped.
