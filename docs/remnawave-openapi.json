@@ -2085,7 +2085,7 @@
             "description": "Email to filter users by",
             "schema": {
               "format": "email",
-              "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+              "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
               "type": "string"
             }
           },
@@ -16128,9 +16128,9 @@
     }
   },
   "info": {
-    "title": "Remnawave API v3.4.8",
+    "title": "Remnawave API v3.4.11",
     "description": "\nRemnawave is a powerful proxy management tool, built on top of Xray-core, with a focus on simplicity and ease of use.\n\n## Resources\n* https://t.me/remnawave\n* https://github.com/remnawave\n* https://docs.rw\n",
-    "version": "3.4.8",
+    "version": "3.4.11",
     "contact": {},
     "license": {
       "name": "AGPL-3.0",
@@ -18197,14 +18197,14 @@
             "nullable": true
           },
           "telegramId": {
-            "type": "number",
             "description": "Optional. Telegram user ID for notifications. Must be an integer.",
+            "type": "number",
             "nullable": true
           },
           "email": {
             "type": "string",
             "format": "email",
-            "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+            "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
             "description": "Optional. User email address. Must be a valid email format.",
             "nullable": true
           },
@@ -18286,7 +18286,7 @@
               "email": {
                 "type": "string",
                 "format": "email",
-                "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+                "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
                 "nullable": true
               },
               "description": {
@@ -18495,7 +18495,7 @@
           "email": {
             "type": "string",
             "format": "email",
-            "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+            "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
             "nullable": true
           },
           "hwidDeviceLimit": {
@@ -18576,7 +18576,7 @@
                     "email": {
                       "type": "string",
                       "format": "email",
-                      "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+                      "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
                       "nullable": true
                     },
                     "description": {
@@ -18794,7 +18794,7 @@
                     "email": {
                       "type": "string",
                       "format": "email",
-                      "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+                      "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
                       "nullable": true
                     },
                     "description": {
@@ -18944,8 +18944,8 @@
                 }
               },
               "nextCursor": {
-                "type": "string",
                 "description": "Cursor to fetch the next page, or null if there are no more results",
+                "type": "string",
                 "nullable": true
               },
               "hasMore": {
@@ -19312,7 +19312,7 @@
               "email": {
                 "type": "string",
                 "format": "email",
-                "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+                "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
                 "nullable": true
               },
               "tag": {
@@ -19433,7 +19433,7 @@
           "email": {
             "type": "string",
             "format": "email",
-            "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+            "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
             "nullable": true
           },
           "tag": {
@@ -20299,7 +20299,7 @@
                   "email": {
                     "type": "string",
                     "format": "email",
-                    "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+                    "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
                     "nullable": true
                   },
                   "description": {
@@ -24758,8 +24758,8 @@
                 }
               },
               "nextCursor": {
-                "type": "string",
                 "description": "Cursor to fetch the next page, or null if there are no more results",
+                "type": "string",
                 "nullable": true
               },
               "hasMore": {
@@ -31066,6 +31066,12 @@
             "title": "Host Mapper",
             "markdownDescription": "Rewrites the config generated for this host, per client type.\n\nOperations run **after** the generator has finished, so they can change or remove anything it produced.\n\nThe source for `copy` is the raw inbound of the config profile this host belongs to, or the host itself when the path starts with `$host.`.\n\n> `to` is never checked against the target client. A misspelled key is written exactly like a real one."
           },
+          "includeInSrrRules": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "internalSquads": {
             "type": "object",
             "properties": {
@@ -32321,6 +32327,12 @@
                 "title": "Host Mapper",
                 "markdownDescription": "Rewrites the config generated for this host, per client type.\n\nOperations run **after** the generator has finished, so they can change or remove anything it produced.\n\nThe source for `copy` is the raw inbound of the config profile this host belongs to, or the host itself when the path starts with `$host.`.\n\n> `to` is never checked against the target client. A misspelled key is written exactly like a real one."
               },
+              "includeInSrrRules": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
               "internalSquads": {
                 "type": "object",
                 "properties": {
@@ -32374,6 +32386,7 @@
               "xrayJsonTemplateUuid",
               "excludeFromSubscriptionTypes",
               "mapper",
+              "includeInSrrRules",
               "internalSquads"
             ]
           }
@@ -33595,6 +33608,12 @@
             },
             "title": "Host Mapper",
             "markdownDescription": "Rewrites the config generated for this host, per client type.\n\nOperations run **after** the generator has finished, so they can change or remove anything it produced.\n\nThe source for `copy` is the raw inbound of the config profile this host belongs to, or the host itself when the path starts with `$host.`.\n\n> `to` is never checked against the target client. A misspelled key is written exactly like a real one."
+          },
+          "includeInSrrRules": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "internalSquads": {
             "type": "object",
@@ -34850,6 +34869,12 @@
                   "title": "Host Mapper",
                   "markdownDescription": "Rewrites the config generated for this host, per client type.\n\nOperations run **after** the generator has finished, so they can change or remove anything it produced.\n\nThe source for `copy` is the raw inbound of the config profile this host belongs to, or the host itself when the path starts with `$host.`.\n\n> `to` is never checked against the target client. A misspelled key is written exactly like a real one."
                 },
+                "includeInSrrRules": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
                 "internalSquads": {
                   "type": "object",
                   "properties": {
@@ -34903,6 +34928,7 @@
                 "xrayJsonTemplateUuid",
                 "excludeFromSubscriptionTypes",
                 "mapper",
+                "includeInSrrRules",
                 "internalSquads"
               ]
             }
@@ -36230,6 +36256,12 @@
             },
             "title": "Host Mapper",
             "markdownDescription": "Rewrites the config generated for this host, per client type.\n\nOperations run **after** the generator has finished, so they can change or remove anything it produced.\n\nThe source for `copy` is the raw inbound of the config profile this host belongs to, or the host itself when the path starts with `$host.`.\n\n> `to` is never checked against the target client. A misspelled key is written exactly like a real one."
+          },
+          "includeInSrrRules": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "internalSquads": {
             "type": "object",
@@ -42178,7 +42210,7 @@
               "email": {
                 "type": "string",
                 "format": "email",
-                "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+                "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
                 "nullable": true
               },
               "description": {
@@ -42420,7 +42452,7 @@
                   "email": {
                     "type": "string",
                     "format": "email",
-                    "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+                    "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
                     "nullable": true
                   },
                   "description": {
@@ -43847,7 +43879,7 @@
                   "email": {
                     "type": "string",
                     "format": "email",
-                    "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+                    "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
                     "nullable": true
                   },
                   "description": {

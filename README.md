@@ -4,8 +4,8 @@
 
 RemnaShop-Pro 是一个面向 **Remnawave 面板** 的 Telegram 机器人，提供订阅售卖、续费、状态查询与基础运维能力。
 
-当前适配目标为 **Remnawave Panel 3.4.8**，对应官方
-`@remnawave/backend-contract 3.4.15`。接口来源、完整调用清单和旧数据升级规则
+当前适配目标为 **Remnawave Panel 3.4.11**，对应官方
+`@remnawave/backend-contract 3.4.17`。接口来源、完整调用清单和旧数据升级规则
 分别见 [契约来源](docs/remnawave-contract-source.md)、
 [完整 OpenAPI 差异](docs/remnawave-openapi-diff.md)、
 [API 清单](docs/remnawave-api-inventory.md)、
@@ -16,6 +16,9 @@ RemnaShop-Pro 是一个面向 **Remnawave 面板** 的 Telegram 机器人，提�
 [V3.8.1 发布说明](docs/releases/v3.8.1.md) 和
 [V3.8.2 发布说明](docs/releases/v3.8.2.md) 和
 [V3.9.0 支付接入说明](docs/releases/v3.9.0.md)。
+
+面板兼容目标已更新为 3.4.11，契约包为 3.4.17；49 个直接运行时 API 调用的路径保持不变。
+完整差异和验收边界见 [3.4.11 兼容性说明](docs/remnawave-3.4.11-compatibility.md)。
 
 ---
 
@@ -288,7 +291,7 @@ Compose 已声明上述 `latest` 镜像，同时保留源码构建定义；安�
 
 > 若旧机器仍在运行 `remnashop.service`，请先停用旧服务再切换，避免重复实例同时运行。
 
-### 从 Remnawave 2.x 升级到 3.4.8
+### 从 Remnawave 2.x 升级到 3.4.11
 
 升级前备份 `remnashop-data` 数据卷。旧 SQLite 中的用户 UUID 会完整保留；
 新版以数值用户 ID 调用面板。只有 Telegram ID 对应关系唯一时才自动绑定；
