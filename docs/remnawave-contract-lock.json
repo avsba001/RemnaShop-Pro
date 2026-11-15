@@ -1,0 +1,15 @@
+{
+  "panel_version": "3.4.8",
+  "contract_version": "3.4.15",
+  "retrieved_on": "2026-11-08",
+  "release_url": "https://github.com/remnawave/backend/releases/tag/3.4.8",
+  "source_url": "https://cdn.docs.rw/docs/openapi.json",
+  "contract_package_url": "https://raw.githubusercontent.com/remnawave/backend/3.4.8/libs/contract/package.json",
+  "source_sha256": "b8c1480ab310da0af0f802f8d59b17766e6097ad5b5d6b83eb0bb9829e83b89b",
+  "vendored_lf_sha256": "ff6edd22f333335478a8f714457b950e16dd56a4fdc2096192c7ddee4bd666ff",
+  "paths_canonical_sha256": "2c144b3c3c373512de17765ae66234131d1b491d2aed78f0ea4c5e682cf31b4d",
+  "components_canonical_sha256": "9cafdb89c082d7929b74d081b07bb25affdcb19d4cb1ff7769e60a0bd2d13775",
+  "path_count": 162,
+  "operation_count": 218,
+  "schema_count": 309
+}

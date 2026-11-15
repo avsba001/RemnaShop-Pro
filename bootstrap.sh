@@ -1,0 +1,695 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_URL="${REPO_URL:-https://github.com/avsba001/RemnaShop-Pro.git}"
+INSTALL_DIR="${INSTALL_DIR:-/opt/remnashop-pro}"
+BRANCH="${BRANCH:-main}"
+PROJECT_NAME="remnashop"
+
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+log() {
+  echo -e "${GREEN}[remnashop-bootstrap]${NC} $*"
+}
+
+warn() {
+  echo -e "${YELLOW}[warn]${NC} $*"
+}
+
+err() {
+  echo -e "${RED}[error]${NC} $*" >&2
+}
+
+usage() {
+  cat <<USAGE
+用法:
+  bash bootstrap.sh install [--no-start] [--local-source]
+  # --no-start：只准备配置并构建镜像，不启动服务，不要求立即填写 Bot 配置
+  # --local-source：使用已校验目录中的本地源码，不拉取或覆盖工作区
+  bash bootstrap.sh uninstall
+  bash bootstrap.sh              # 有 TTY 时显示交互菜单；否则默认执行 install
+
+公网一键安装:
+  curl -fsSL https://raw.githubusercontent.com/avsba001/RemnaShop-Pro/main/bootstrap.sh | bash
+公网一键卸载:
+  curl -fsSL https://raw.githubusercontent.com/avsba001/RemnaShop-Pro/main/bootstrap.sh | bash -s -- uninstall
+USAGE
+}
+
+need_sudo() {
+  if [ "${EUID}" -eq 0 ]; then
+    SUDO=""
+  else
+    SUDO="sudo"
+  fi
+}
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+detect_package_manager() {
+  if require_cmd apt-get; then
+    PACKAGE_MANAGER="apt"
+  elif require_cmd dnf; then
+    PACKAGE_MANAGER="dnf"
+  elif require_cmd yum; then
+    PACKAGE_MANAGER="yum"
+  else
+    PACKAGE_MANAGER=""
+  fi
+}
+
+pkg_update_if_needed() {
+  if [ "${PKG_UPDATED:-0}" -eq 1 ]; then
+    return
+  fi
+
+  case "${PACKAGE_MANAGER}" in
+    apt)
+      log "正在刷新 apt 软件包索引..."
+      ${SUDO} apt-get update -y
+      ;;
+    dnf|yum)
+      ;;
+    *)
+      err "未找到受支持的软件包管理器，无法自动安装依赖。"
+      return 1
+      ;;
+  esac
+
+  PKG_UPDATED=1
+}
+
+install_packages() {
+  if [ "$#" -eq 0 ]; then
+    return 0
+  fi
+
+  case "${PACKAGE_MANAGER}" in
+    apt)
+      pkg_update_if_needed
+      ${SUDO} apt-get install -y "$@"
+      ;;
+    dnf)
+      ${SUDO} dnf install -y "$@"
+      ;;
+    yum)
+      ${SUDO} yum install -y "$@"
+      ;;
+    *)
+      err "无法自动安装软件包：当前系统的软件包管理器不受支持。"
+      return 1
+      ;;
+  esac
+}
+
+ensure_cmd_with_package() {
+  local cmd="$1"
+  local pkg="$2"
+
+  if require_cmd "${cmd}"; then
+    log "依赖检查：${cmd} 已安装。"
+    return 0
+  fi
+
+  warn "缺少依赖：${cmd}。正在尝试自动安装（软件包：${pkg}）。"
+  install_packages "${pkg}"
+  if require_cmd "${cmd}"; then
+    log "依赖安装完成：${cmd}。"
+    return 0
+  fi
+
+  err "依赖 '${cmd}' 自动安装失败。"
+  return 1
+}
+
+install_base_dependencies() {
+  detect_package_manager
+  if [ -z "${PACKAGE_MANAGER}" ]; then
+    err "当前系统不受支持：自动安装依赖仅支持 apt、dnf 或 yum。"
+    exit 1
+  fi
+
+  log "正在检查并准备 bootstrap 所需基础依赖。"
+  ensure_cmd_with_package bash bash
+  ensure_cmd_with_package tar tar
+  ensure_cmd_with_package gzip gzip
+  ensure_cmd_with_package unzip unzip
+  ensure_cmd_with_package jq jq
+  ensure_cmd_with_package sed sed
+  ensure_cmd_with_package grep grep
+  ensure_cmd_with_package awk gawk
+  ensure_cmd_with_package ls coreutils
+  ensure_cmd_with_package curl curl
+  ensure_cmd_with_package git git
+
+  if ! require_cmd update-ca-certificates; then
+    warn "缺少依赖：ca-certificates。正在尝试自动安装。"
+    install_packages ca-certificates
+    if ! require_cmd update-ca-certificates; then
+      err "ca-certificates 自动安装失败。"
+      exit 1
+    fi
+  else
+    log "依赖检查：ca-certificates 已安装。"
+  fi
+}
+
+install_docker() {
+  if require_cmd docker; then
+    log "Docker 已安装：$(docker --version)"
+    return
+  fi
+
+  log "未检测到 Docker，开始安装..."
+  curl -fsSL https://get.docker.com | sh
+  ${SUDO} systemctl enable docker >/dev/null 2>&1 || true
+  ${SUDO} systemctl start docker >/dev/null 2>&1 || true
+
+  if ! require_cmd docker; then
+    err "Docker 安装失败。"
+    exit 1
+  fi
+
+  log "Docker 安装完成：$(docker --version)"
+}
+
+install_docker_compose() {
+  if docker compose version >/dev/null 2>&1; then
+    log "Docker Compose 已可用：$(docker compose version | head -n 1)"
+    return
+  fi
+
+  log "未检测到 Docker Compose 插件，开始安装..."
+
+  if require_cmd apt-get; then
+    ${SUDO} apt-get update -y
+    ${SUDO} apt-get install -y docker-compose-plugin
+  elif require_cmd dnf; then
+    ${SUDO} dnf install -y docker-compose-plugin
+  elif require_cmd yum; then
+    ${SUDO} yum install -y docker-compose-plugin
+  else
+    err "当前软件包管理器不受支持，请手动安装 Docker Compose 插件。"
+    exit 1
+  fi
+
+  if ! docker compose version >/dev/null 2>&1; then
+    err "Docker Compose 安装失败。"
+    exit 1
+  fi
+
+  log "Docker Compose 安装完成：$(docker compose version | head -n 1)"
+}
+
+prepare_repo() {
+  if [ "${USE_LOCAL_SOURCE:-0}" -eq 1 ]; then
+    if ! verified_install_dir; then
+      err "本地源码目录未通过项目仓库校验，已停止。"
+      return 1
+    fi
+    log "使用已校验的本地源码目录，不执行 Git 更新：${INSTALL_DIR}"
+    return 0
+  fi
+  log "正在准备仓库目录：${INSTALL_DIR}"
+  log "说明：安装目录会保留完整 git 仓库（含 docs/README 等文件）；这些文件是否进入生产镜像由 Dockerfile + .dockerignore 决定。"
+  case "${INSTALL_DIR%/}" in
+    */remnashop-pro|*/RemnaShop-Pro) ;;
+    *)
+      err "安装目录必须以 remnashop-pro 命名，已停止以避免接管未知路径。"
+      exit 1
+      ;;
+  esac
+  if [ -L "${INSTALL_DIR}" ]; then
+    err "安装目录是符号链接，无法安全确认目标；安装已停止。"
+    exit 1
+  fi
+
+  if [ -d "${INSTALL_DIR}/.git" ]; then
+    log "检测到已有 git 仓库，正在更新..."
+    local current_remote
+    current_remote="$(git -C "${INSTALL_DIR}" remote get-url origin 2>/dev/null || true)"
+    if [ "${current_remote}" != "${REPO_URL}" ] && [ "${current_remote}" != "${REPO_URL%.git}" ]; then
+      err "现有目录的 origin 与 RemnaShop-Pro 仓库不匹配，已停止；不会接管或删除。"
+      exit 1
+    fi
+    if [ -n "$(git -C "${INSTALL_DIR}" status --porcelain)" ]; then
+      err "现有仓库包含未提交修改，请先备份或处理后再更新。"
+      exit 1
+    fi
+    git -C "${INSTALL_DIR}" fetch origin
+    git -C "${INSTALL_DIR}" checkout "${BRANCH}"
+    git -C "${INSTALL_DIR}" pull --ff-only origin "${BRANCH}"
+  else
+    ${SUDO} mkdir -p "$(dirname "${INSTALL_DIR}")"
+    if [ -d "${INSTALL_DIR}" ]; then
+      if [ -n "$(ls -A "${INSTALL_DIR}")" ]; then
+        err "${INSTALL_DIR} 已存在且非空，也不是项目 Git 仓库。请人工确认目录内容；安装已停止，未删除文件。"
+        exit 1
+      fi
+    fi
+    git clone --branch "${BRANCH}" --depth 1 "${REPO_URL}" "${INSTALL_DIR}"
+  fi
+}
+
+prepare_env() {
+  cd "${INSTALL_DIR}"
+
+  if [ ! -f .env ] && [ -f .env.example ]; then
+    # Source archives may be prepared on Windows; do not copy CR into values.
+    sed 's/\r$//' .env.example > .env
+    log "已根据 .env.example 创建 .env"
+  elif [ -f .env ]; then
+    log ".env 已存在，将保留现有配置并仅处理必填项。"
+  else
+    err "缺少 .env.example，无法初始化环境变量文件。"
+    exit 1
+  fi
+}
+
+get_env_value() {
+  local key="$1"
+  local env_file="${INSTALL_DIR}/.env"
+  [ -f "${env_file}" ] || return 0
+  awk -F= -v k="${key}" '$1==k {sub(/^[^=]*=/, "", $0); print; exit}' "${env_file}"
+}
+
+valid_admin_id() {
+  [[ "$1" =~ ^[1-9][0-9]*$ ]]
+}
+
+valid_bot_token() {
+  [[ "$1" =~ ^[0-9]+:[A-Za-z0-9_-]{20,}$ ]]
+}
+
+upsert_env_value() {
+  local key="$1"
+  local value="$2"
+  local env_file="${INSTALL_DIR}/.env"
+  local escaped
+  escaped="$(printf '%s' "${value}" | sed 's/[\/&]/\\&/g')"
+
+  if grep -qE "^${key}=" "${env_file}"; then
+    sed -i "s/^${key}=.*/${key}=${escaped}/" "${env_file}"
+  else
+    printf '\n%s=%s\n' "${key}" "${value}" >>"${env_file}"
+  fi
+}
+
+prompt_required_env() {
+  local admin_current bot_current admin_new bot_new keep
+  admin_current="$(get_env_value "ADMIN_ID")"
+  bot_current="$(get_env_value "BOT_TOKEN")"
+  # /dev/tty may exist and be readable without a controlling terminal (SSH exec).
+  if [ ! -r /dev/tty ] || ! ( : </dev/tty ) 2>/dev/null; then
+    if valid_admin_id "${admin_current}" && valid_bot_token "${bot_current}"; then
+      log "非交互安装：已检测到 .env 中配置的 ADMIN_ID 和 BOT_TOKEN。"
+      return
+    fi
+    err "设置 ADMIN_ID 和 BOT_TOKEN 需要交互输入，但当前没有可用的 TTY。"
+    err "请在终端中运行，或先在 ${INSTALL_DIR}/.env 中预设这两个变量。"
+    exit 1
+  fi
+
+  echo
+  log "正在配置必填环境变量（仅 ADMIN_ID 与 BOT_TOKEN）。"
+
+  if valid_admin_id "${admin_current}"; then
+    printf "检测到现有 ADMIN_ID='%s'，是否保留？[Y/n]: " "${admin_current}" >/dev/tty
+    read -r keep </dev/tty
+    if [[ ! "${keep:-Y}" =~ ^[Yy]$ ]]; then
+      while true; do
+        printf "请输入 ADMIN_ID: " >/dev/tty
+        read -r admin_new </dev/tty
+        if valid_admin_id "${admin_new}"; then
+          upsert_env_value "ADMIN_ID" "${admin_new}"
+          break
+        fi
+        warn "ADMIN_ID 必须是正整数。"
+      done
+    fi
+  else
+    while true; do
+      printf "请输入 ADMIN_ID: " >/dev/tty
+      read -r admin_new </dev/tty
+      if valid_admin_id "${admin_new}"; then
+        upsert_env_value "ADMIN_ID" "${admin_new}"
+        break
+      fi
+      warn "ADMIN_ID 必须是正整数。"
+    done
+  fi
+
+  if valid_bot_token "${bot_current}"; then
+    printf "检测到已配置 BOT_TOKEN，是否保留？[Y/n]: " >/dev/tty
+    read -r keep </dev/tty
+    if [[ ! "${keep:-Y}" =~ ^[Yy]$ ]]; then
+      while true; do
+        printf "请输入 BOT_TOKEN: " >/dev/tty
+        read -rs bot_new </dev/tty
+        printf '\n' >/dev/tty
+        if valid_bot_token "${bot_new}"; then
+          upsert_env_value "BOT_TOKEN" "${bot_new}"
+          break
+        fi
+        warn "BOT_TOKEN 格式无效。"
+      done
+    fi
+  else
+    while true; do
+      printf "请输入 BOT_TOKEN: " >/dev/tty
+      read -rs bot_new </dev/tty
+      printf '\n' >/dev/tty
+      if valid_bot_token "${bot_new}"; then
+        upsert_env_value "BOT_TOKEN" "${bot_new}"
+        break
+      fi
+      warn "BOT_TOKEN 格式无效。"
+    done
+  fi
+
+  if ! valid_admin_id "$(get_env_value "ADMIN_ID")" || ! valid_bot_token "$(get_env_value "BOT_TOKEN")"; then
+    err "${INSTALL_DIR}/.env 中必须同时设置 ADMIN_ID 和 BOT_TOKEN。"
+    exit 1
+  fi
+}
+
+start_stack() {
+  cd "${INSTALL_DIR}"
+  log "正在启动 Docker Compose 服务栈..."
+  docker compose -p "${PROJECT_NAME}" up -d --build
+}
+
+print_failure_hint() {
+  cat <<MSG
+
+❌ 安装失败：remnashop / http 服务栈未全部进入 healthy 状态。
+排查建议：
+  cd ${INSTALL_DIR}
+  docker compose -p ${PROJECT_NAME} ps
+  docker compose -p ${PROJECT_NAME} logs --tail=200 remnashop http
+
+MSG
+}
+
+wait_for_health() {
+  cd "${INSTALL_DIR}"
+  local timeout="${HEALTH_TIMEOUT_SECONDS:-300}"
+  local elapsed=0 interval=5
+  local container_id state health restart_count service all_healthy
+  while [ "${elapsed}" -lt "${timeout}" ]; do
+    all_healthy=1
+    for service in remnashop http; do
+      container_id="$(docker compose -p "${PROJECT_NAME}" ps -q "${service}" || true)"
+      if [ -z "${container_id}" ]; then
+        err "未找到 ${service} 容器。"
+        print_failure_hint
+        return 1
+      fi
+      state="$(docker inspect --format='{{.State.Status}}' "${container_id}" 2>/dev/null || echo "unknown")"
+      health="$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "${container_id}" 2>/dev/null || echo "unknown")"
+      restart_count="$(docker inspect --format='{{.RestartCount}}' "${container_id}" 2>/dev/null || echo "0")"
+      if [ "${state}" = "exited" ] || [ "${state}" = "dead" ] || [ "${health}" = "unhealthy" ] || [ "${state}" = "restarting" ] || [ "${restart_count}" -gt 3 ]; then
+        err "${service} 容器状态异常（state=${state}, health=${health}, restarts=${restart_count}）。"
+        print_failure_hint
+        return 1
+      fi
+      if [ "${state}" != "running" ] || [ "${health}" != "healthy" ]; then
+        all_healthy=0
+        echo "[等待中] ${service} state=${state}, health=${health} (${elapsed}s/${timeout}s)"
+      fi
+    done
+    if [ "${all_healthy}" -eq 1 ]; then
+      log "remnashop 和 http 容器均已进入 healthy 状态。"
+      return 0
+    fi
+    sleep "${interval}"
+    elapsed=$((elapsed + interval))
+  done
+  err "等待超时：${timeout}s 内服务栈未全部达到 healthy。"
+  print_failure_hint
+  return 1
+}
+
+verify_stack() {
+  cd "${INSTALL_DIR}"
+
+  log "校验：Docker"
+  docker --version
+
+  log "校验：Docker Compose"
+  docker compose version
+
+  log "校验：环境变量文件"
+  if [ -f .env ]; then
+    echo "[ok] ${INSTALL_DIR}/.env exists"
+  else
+    err ".env 文件不存在"
+    exit 1
+  fi
+
+  log "校验：服务栈状态"
+  docker compose -p "${PROJECT_NAME}" ps
+
+  log "校验：服务健康状态"
+  container_id="$(docker compose -p "${PROJECT_NAME}" ps -q remnashop || true)"
+  if [ -n "${container_id}" ]; then
+    health="$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "${container_id}")"
+    echo "[ok] remnashop container health: ${health}"
+  else
+    err "未找到 remnashop 容器"
+    exit 1
+  fi
+}
+
+verified_install_dir() {
+  [ -d "${INSTALL_DIR}/.git" ] || return 1
+  [ ! -L "${INSTALL_DIR}" ] || return 1
+  [ -f "${INSTALL_DIR}/bootstrap.sh" ] || return 1
+  [ -f "${INSTALL_DIR}/docker-compose.yml" ] || return 1
+  local resolved_dir
+  resolved_dir="$(cd "${INSTALL_DIR}" && pwd -P)" || return 1
+  case "${resolved_dir}" in
+    */remnashop-pro|*/RemnaShop-Pro) ;;
+    *) return 1 ;;
+  esac
+  local current_remote
+  current_remote="$(git -C "${INSTALL_DIR}" remote get-url origin 2>/dev/null || true)"
+  [ "${current_remote}" = "${REPO_URL}" ] || [ "${current_remote}" = "${REPO_URL%.git}" ]
+}
+
+uninstall_stack() {
+  if ! verified_install_dir; then
+    warn "安装目录未通过 RemnaShop-Pro 仓库校验，跳过 Docker 和目录删除；请人工检查。"
+    return
+  fi
+  if ! require_cmd docker; then
+    err "未检测到 Docker，无法确认项目资源已清理；已停止卸载并保留项目目录。"
+    return 1
+  fi
+
+  if [ -f "${INSTALL_DIR}/docker-compose.yml" ]; then
+    log "正在停止并删除 RemnaShop-Pro 的 Compose 服务栈..."
+    docker compose -f "${INSTALL_DIR}/docker-compose.yml" -p "${PROJECT_NAME}" down -v --rmi all --remove-orphans
+  else
+    warn "未找到 ${INSTALL_DIR}/docker-compose.yml，将仅尝试按项目标签清理。"
+  fi
+
+  local ids
+  ids="$(docker ps -aq --filter "label=com.docker.compose.project=${PROJECT_NAME}")"
+  if [ -n "${ids}" ]; then
+    log "正在清理项目 ${PROJECT_NAME} 的残留容器。"
+    docker rm -f ${ids}
+  fi
+
+  local volume_ids
+  volume_ids="$(docker volume ls -q --filter "label=com.docker.compose.project=${PROJECT_NAME}")"
+  if [ -n "${volume_ids}" ]; then
+    log "正在清理项目 ${PROJECT_NAME} 的残留数据卷。"
+    docker volume rm ${volume_ids}
+  fi
+
+  local image_ids
+  image_ids="$(docker image ls -q --filter "label=com.docker.compose.project=${PROJECT_NAME}")"
+  if [ -n "${image_ids}" ]; then
+    log "正在清理项目 ${PROJECT_NAME} 的残留镜像。"
+    docker image rm ${image_ids}
+  fi
+}
+
+remove_project_directory() {
+  if verified_install_dir; then
+    local resolved_dir
+    resolved_dir="$(cd "${INSTALL_DIR}" && pwd -P)"
+    case "${resolved_dir}" in
+      */remnashop-pro|*/RemnaShop-Pro)
+        ;;
+      *)
+        err "拒绝删除不符合项目目录命名的路径：${resolved_dir}"
+        return 1
+        ;;
+    esac
+    log "正在删除已验证项目目录：${resolved_dir}"
+    ${SUDO} rm -rf -- "${resolved_dir}"
+  else
+    warn "项目目录不存在或未通过仓库校验，未删除目录：${INSTALL_DIR}"
+  fi
+}
+
+confirm_uninstall_if_needed() {
+  if [ ! -r /dev/tty ]; then
+    warn "未检测到交互式 TTY，将直接继续卸载（仅影响 RemnaShop-Pro 项目资源）。"
+    return
+  fi
+
+  echo
+  warn "即将删除（仅限 RemnaShop-Pro 资源）："
+  warn "- Compose 项目：${PROJECT_NAME}"
+  warn "- 该项目创建的容器/镜像/数据卷"
+  warn "- 项目目录：${INSTALL_DIR}"
+  printf "请输入确认（YES/yes/Y/y）以继续卸载，其他任意输入将取消: " >/dev/tty
+  read -r confirm </dev/tty
+  confirm="$(printf '%s' "${confirm}" | tr -d '[:space:]')"
+  confirm="$(printf '%s' "${confirm}" | tr '[:upper:]' '[:lower:]')"
+  if [ "${confirm}" != "yes" ] && [ "${confirm}" != "y" ]; then
+    log "已取消卸载。"
+    exit 0
+  fi
+}
+
+install_flow() {
+  install_base_dependencies
+  install_docker
+  install_docker_compose
+  prepare_repo
+  prepare_env
+  if [ "${NO_START:-0}" -eq 1 ]; then
+    chmod 600 "${INSTALL_DIR}/.env"
+    cd "${INSTALL_DIR}"
+    if [ -n "$(docker ps -q --filter "label=com.docker.compose.project=${PROJECT_NAME}")" ]; then
+      err "该项目存在运行中的容器，拒绝将本次操作报告为未启动部署；未停止现有容器。"
+      return 1
+    fi
+    log "仅准备模式：校验 Compose 配置并构建镜像，不创建或启动应用容器。"
+    docker compose -p "${PROJECT_NAME}" config --quiet
+    docker compose -p "${PROJECT_NAME}" build
+    log "部署准备完成，服务未启动；这不是运行健康验收通过。"
+    log "请编辑 ${INSTALL_DIR}/.env 填写 Bot、Panel 和支付配置。"
+    log "填写完成后执行：REPO_URL='${REPO_URL}' bash ${INSTALL_DIR}/bootstrap.sh install --local-source"
+    return 0
+  fi
+  prompt_required_env
+  start_stack
+  wait_for_health
+  verify_stack
+
+  cat <<MSG
+
+✅ RemnaShop-Pro 安装完成。
+
+安装目录: ${INSTALL_DIR}
+成功判定条件已满足：
+  - docker compose up 已完成
+  - remnashop 容器已达到 health=healthy
+后续可执行：
+  1) 查看状态: cd ${INSTALL_DIR} && docker compose -p ${PROJECT_NAME} ps
+  2) 查看日志: cd ${INSTALL_DIR} && docker compose -p ${PROJECT_NAME} logs -f remnashop
+
+MSG
+}
+
+uninstall_flow() {
+  if ! verified_install_dir; then
+    if [ -e "${INSTALL_DIR}" ]; then
+      err "安装目录未通过项目仓库校验，卸载已停止，未删除任何资源。"
+      return 1
+    fi
+    warn "未找到已验证的安装目录；未执行 Docker 或目录删除。"
+    return 0
+  fi
+  confirm_uninstall_if_needed
+  uninstall_stack
+  remove_project_directory
+
+  cat <<MSG
+
+✅ RemnaShop-Pro 卸载完成。
+仅处理了项目 '${PROJECT_NAME}' 相关资源。
+
+MSG
+}
+
+show_menu() {
+  echo
+  echo "RemnaShop-Pro 引导脚本"
+  echo "1) 安装"
+  echo "2) 卸载"
+  echo "0) 退出"
+  read -r -p "请选择 [0-2]: " choice
+  case "${choice}" in
+    1) ACTION="install" ;;
+    2) ACTION="uninstall" ;;
+    0) exit 0 ;;
+    *) err "无效选择"; exit 1 ;;
+  esac
+}
+
+select_action() {
+  ACTION="${1:-}"
+  FROM_ARG=0
+
+  case "${ACTION}" in
+    install|uninstall)
+      FROM_ARG=1
+      ;;
+    "")
+      if [ -t 0 ]; then
+        show_menu
+      else
+        ACTION="install"
+        log "非交互模式未指定动作，默认执行 install。"
+      fi
+      ;;
+    -h|--help|help)
+      usage
+      exit 0
+      ;;
+    *)
+      err "未知动作：${ACTION}"
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main() {
+  need_sudo
+  select_action "${1:-}"
+  NO_START=0
+  USE_LOCAL_SOURCE=0
+  if [ "$#" -gt 0 ]; then shift; fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --no-start) NO_START=1 ;;
+      --local-source) USE_LOCAL_SOURCE=1 ;;
+      *) err "未知选项：$1"; return 1 ;;
+    esac
+    shift
+  done
+  if [ "${ACTION}" != "install" ] && { [ "${NO_START}" -eq 1 ] || [ "${USE_LOCAL_SOURCE}" -eq 1 ]; }; then
+    err "--no-start 和 --local-source 仅适用于 install。"
+    return 1
+  fi
+
+  if [ "${ACTION}" = "install" ]; then
+    install_flow
+  elif [ "${ACTION}" = "uninstall" ]; then
+    uninstall_flow
+  fi
+}
+
+main "$@"
