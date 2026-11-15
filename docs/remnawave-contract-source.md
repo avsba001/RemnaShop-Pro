@@ -2,52 +2,39 @@
 
 ## Current compatibility target
 
-- Remnawave Panel / Backend: **3.4.8** (latest stable release checked on 2026-11-08).
-- Matching official `@remnawave/backend-contract`: **3.4.15**.
-- Official release: <https://github.com/remnawave/backend/releases/tag/3.4.8>.
-- Backend release commit: `4e989707a20785ea7d445ddb1e09132d800f48d8`.
-- The contract version is verified from the release's own
-  [`libs/contract/package.json`](https://github.com/remnawave/backend/blob/3.4.8/libs/contract/package.json),
-  not inferred from an npm `latest` tag. The documentation SDK table still lists
-  Panel 3.4.4; the 3.4.8 source also declares contract 3.4.15.
+- Remnawave Panel / Backend: **3.4.11**, checked on 2026-11-15.
+- Matching official `@remnawave/backend-contract`: **3.4.17**.
+- Official release: <https://github.com/remnawave/backend/releases/tag/3.4.11> (published 2026-11-14).
+- Backend release commit: `6853666801d6d1925b6aec55824106100485777a`.
+- Contract package version comes from the release's own
+  [`libs/contract/package.json`](https://raw.githubusercontent.com/remnawave/backend/3.4.11/libs/contract/package.json), not an npm latest tag.
 
 ## Official OpenAPI acquisition
 
 - Source: <https://cdn.docs.rw/docs/openapi.json>.
-- Retrieved document: `info.version: 3.4.8`, `title: Remnawave API v3.4.8`.
-- The release's official
-  [OpenAPI publishing workflow](https://github.com/remnawave/backend/blob/3.4.8/.github/workflows/push-openapi-specs.yml)
-  generates `openapi.json` on release tags and publishes it under `docs/`.
-- Original downloaded JSON SHA-256:
-  `b8c1480ab310da0af0f802f8d59b17766e6097ad5b5d6b83eb0bb9829e83b89b`.
-- Formatted repository JSON SHA-256 (UTF-8, two-space indentation, LF):
-  `ff6edd22f333335478a8f714457b950e16dd56a4fdc2096192c7ddee4bd666ff`.
+- Downloaded document: `info.version: 3.4.11`, `title: Remnawave API v3.4.11`.
+- The official [publishing workflow](https://github.com/remnawave/backend/blob/3.4.11/.github/workflows/push-openapi-specs.yml)
+  publishes the generated OpenAPI on release tags.
+- Raw downloaded JSON SHA-256: `d58d8092dfc3cf979dd3f8cf32df99caa3feff0f86cfae19d852e38d9730a391`.
+- Repository JSON SHA-256 (UTF-8, two-space indentation, LF): `48cdd0ca299a3bcce2e9a4e92167b1a354777450b047bb2361dd75c20af93855`.
 - Counts: **162 paths, 218 operations, 309 schemas**.
 
-The repository copy is `docs/remnawave-openapi.json`. Machine-readable version,
-source, checksum and canonical paths/components fingerprints are recorded in
-[`remnawave-contract-lock.json`](remnawave-contract-lock.json). LF normalization makes the formatted
-checksum independent of a Windows Git checkout's CRLF conversion.
+The repository copy is `docs/remnawave-openapi.json`. Version, provenance and
+canonical paths/components fingerprints are in [the lock file](remnawave-contract-lock.json).
 
-## Changes from the previous target
+## Changes from Panel 3.4.8 / contract 3.4.15
 
-The previous repository baseline was Panel 3.4.4 / contract 3.4.15 at bot commit
-`9184031efe393717e9dc85f61bfe9f9ffe636d8c`. Comparing the complete JSON documents:
+- No operation path or method was added or removed.
+- The email validation pattern changed in the users stream query and user-related DTOs.
+- Host DTOs gained `includeInSrrRules`; Host response schemas require this array.
+- The bot does not manage Hosts or validate email with its own copied regex.
+  Its existing payload field allowlists and required user response fields still match.
+- All 49 direct runtime calls remain mapped to documented operations. Do not add
+  guessed routes, HTTP write retries, or unused Host management for this update.
 
-- Only `info.title` and `info.version` changed.
-- All `paths` and all `components`, including request and response schemas,
-  are identical, not merely the endpoints used by this bot.
-- `openapi`, `tags` and `servers` are also unchanged.
-- No runtime route, payload field, response envelope or user identity change is
-  required for 3.4.8. The bot continues to use numeric Panel user IDs.
+See [3.4.11 compatibility](remnawave-3.4.11-compatibility.md) and
+[the runtime inventory](remnawave-api-inventory.md).
 
-See [3.4.4 to 3.4.8 verification](remnawave-3.4.8-compatibility.md) and the
-[complete runtime API inventory](remnawave-api-inventory.md).
-
-The public CDN URL can change to a later Panel release. Always inspect its
-reported version before refreshing the vendored file. Never relabel an older
-specification as a new release. Any target change must update the official
-contract snapshot, runtime client, inventory, lock and contract tests together.
-
-These are official-source and offline contract checks, not a claim that a live
-Panel or production Telegram bot has been exercised.
+The public CDN can advance to another release. Check `info.version` before
+updating the snapshot; never relabel an older spec. The contract check and mock
+HTTP validation do not establish live Panel or Telegram business compatibility.

@@ -10,8 +10,8 @@ This repository must support exactly one deployment method: Docker Compose.
 - The bootstrap script is the single entrypoint for install/uninstall workflows.
 
 ## API source of truth
-The supported Remnawave target is Panel **3.4.8**, with official
-`@remnawave/backend-contract` **3.4.15**. Use the vendored
+The supported Remnawave target is Panel **3.4.11**, with official
+`@remnawave/backend-contract` **3.4.17**. Use the vendored
 `docs/remnawave-openapi.json` for all runtime API work. Its provenance and
 checksums are recorded in `docs/remnawave-contract-source.md`.
 

@@ -1,14 +1,14 @@
-# Remnawave 2.x to 3.4.8 migration
+# Remnawave 2.x to 3.4.11 migration
 
-RemnaShop-Pro targets Remnawave Panel **3.4.8** and
-`@remnawave/backend-contract` **3.4.15**. See
+RemnaShop-Pro targets Remnawave Panel **3.4.11** and
+`@remnawave/backend-contract` **3.4.17**. See
 [contract provenance](remnawave-contract-source.md) and the
 [complete runtime API inventory](remnawave-api-inventory.md). The
 [full operation diff](remnawave-openapi-diff.md) covers all 2.7.4 and 3.4.4
 OpenAPI paths, including operations outside this bot's runtime surface.
-The official 3.4.8 paths and schemas are identical to 3.4.4; see the
-[3.4.8 compatibility verification](remnawave-3.4.8-compatibility.md).
-The historical 3.4.4 comparisons below therefore still apply to this target.
+The 3.4.11 target keeps the same operation paths as 3.4.8, while email patterns
+and Host schemas changed; see the [3.4.11 compatibility verification](remnawave-3.4.11-compatibility.md).
+The historical 2.x identity and endpoint migration below remains applicable.
 
 ## Contract changes that affect this bot
 
@@ -98,7 +98,7 @@ directory while installing. Installation succeeds only after the container
 becomes healthy.
 
 The upgraded database keeps legacy columns, but **downgrading the bot against
-a 3.4.8 Panel is unsupported**: the old runtime uses removed user UUID routes.
+a 3.4.11 Panel is unsupported**: the old runtime uses removed user UUID routes.
 Keep a pre-upgrade volume backup for a controlled rollback of bot data and
 configuration. Restoring a backup overwrites later local changes, so perform
 it only after reviewing those changes.

@@ -1,9 +1,9 @@
 # Remnawave OpenAPI 2.7.4 to 3.4.4 operation diff
 
-> Historical migration comparison. The current supported target is **3.4.8**.
-> Its official `paths` and `components` are identical to 3.4.4, so the operation
-> differences below remain applicable. See the complete
-> [3.4.4 to 3.4.8 verification](remnawave-3.4.8-compatibility.md) and
+> Historical migration comparison. The current supported target is **3.4.11**.
+> The operation paths remain unchanged from 3.4.8; email patterns and Host schemas
+> have changed. See the
+> [3.4.8 to 3.4.11 verification](remnawave-3.4.11-compatibility.md) and
 > [current contract provenance](remnawave-contract-source.md).
 
 Compared against the repository baseline at `8c1393cf` and the vendored
