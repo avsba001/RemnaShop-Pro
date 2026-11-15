@@ -32,12 +32,28 @@ def init_db(db_file: str) -> None:
         conn.close()
     from storage.payments import init_payments
     init_payments(db_file)
+    conn = _connect(db_file)
+    try:
+        # Return manual reservations atomically with rejection, including every UI path.
+        conn.execute('''CREATE TRIGGER IF NOT EXISTS return_manual_plan_stock
+            AFTER UPDATE OF status ON orders
+            WHEN NEW.status='rejected' AND OLD.status!='rejected' AND OLD.stock_reserved=1
+              AND NOT EXISTS (SELECT 1 FROM payment_intents p
+                  WHERE p.product_kind='subscription' AND p.business_id=NEW.order_id)
+            BEGIN
+                UPDATE plans SET stock=stock+1 WHERE key=NEW.plan_key AND stock IS NOT NULL;
+                UPDATE orders SET stock_reserved=0 WHERE order_id=NEW.order_id;
+            END''')
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _init_db_on_connection(conn: sqlite3.Connection) -> None:
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS plans (key TEXT PRIMARY KEY, name TEXT, price TEXT, usdt_price TEXT, days INTEGER, gb INTEGER, reset_strategy TEXT)''')
     _add_column(conn, "plans", "group_uuids", "TEXT")
+    _add_column(conn, "plans", "stock", "INTEGER CHECK(stock IS NULL OR stock>=0)")
     c.execute('''CREATE TABLE IF NOT EXISTS subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER, uuid TEXT, created_at TIMESTAMP)''')
     _add_column(conn, "subscriptions", "user_id", "INTEGER")
     _add_column(conn, "subscriptions", "migration_status", "TEXT")
@@ -91,6 +107,7 @@ def _init_db_on_connection(conn: sqlite3.Connection) -> None:
     )
     _add_column(conn, "orders", "target_user_id", "INTEGER")
     _add_column(conn, "orders", "delivered_user_id", "INTEGER")
+    _add_column(conn, "orders", "stock_reserved", "INTEGER NOT NULL DEFAULT 0")
     c.execute('''CREATE TABLE IF NOT EXISTS manual_order_details (
         order_id TEXT PRIMARY KEY,
         payment_method TEXT NOT NULL CHECK(payment_method IN ('manual_review','usdt')),
