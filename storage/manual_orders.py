@@ -7,6 +7,7 @@ from services.zpay import PaymentError, money_fen, yuan
 from storage.db import db_query
 from storage.payments import transaction
 from storage.plan_groups import plan_groups
+from storage.plan_stock import reserve_stock
 
 
 def get_details(db_file, order_id):
@@ -69,6 +70,7 @@ def create_order(db_file, tg_id, plan_key, order_type, target_user_id, payment_m
             (order_id,tg_id,plan_key,order_type,target_user_id,status,menu_message_id,channel_code,created_at,updated_at)
             VALUES (?,?,?,?,?,'pending',?,?,?,?)""",
                      (order_id,tg_id,plan_key,order_type,target or None,menu_message_id,channel_code,now,now))
+        reserve_stock(conn, plan_key, order_id)
         conn.execute('INSERT INTO manual_order_details VALUES (?,?,?)',
                      (order_id,payment_method,json.dumps(snapshot,ensure_ascii=False)))
         conn.execute("""INSERT INTO order_audit_logs(order_id,action,actor_id,detail,created_at)

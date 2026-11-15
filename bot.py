@@ -10,6 +10,7 @@ from services.zpay import ZPayConfig, ZPayClient, PaymentError, yuan, money_fen
 from services.payment_processing import reconcile_payment
 from storage.plan_groups import plan_groups, snapshot_groups, validate_groups, require_available
 from storage import payments, manual_orders
+from storage.plan_stock import stock_label, parse_stock
 from io import BytesIO
 from collections import defaultdict
 from services.panel_api import get_panel_user as api_get_panel_user, get_user_by_telegram_id as api_get_user_by_telegram_id, get_user_by_username as api_get_user_by_username, get_user_by_short_uuid as api_get_user_by_short_uuid, get_nodes_status as api_get_nodes_status, get_subscription_history_stats as api_get_subscription_history_stats, get_user_subscription_history as api_get_user_subscription_history, get_subscription_settings as api_get_subscription_settings, patch_subscription_settings as api_patch_subscription_settings, get_internal_squads as api_get_internal_squads, get_internal_squad_accessible_nodes as api_get_internal_squad_accessible_nodes, get_bandwidth_nodes_usage as api_get_bandwidth_nodes_usage, bulk_move_users_to_squad as api_bulk_move_users_to_squad, create_user as api_create_user, patch_user as api_patch_user, delete_user as api_delete_user, enable_user as api_enable_user, disable_user as api_disable_user, reset_user_traffic as api_reset_user_traffic, get_subscription_request_history as api_get_subscription_request_history, bulk_delete_users as api_bulk_delete_users, bulk_update_users as api_bulk_update_users, get_contract_capabilities as api_get_contract_capabilities, set_user_metadata as api_set_user_metadata, block_ip_address as api_block_ip_address, get_system_health as api_get_system_health, get_system_stats as api_get_system_stats, get_system_stats_recap as api_get_system_stats_recap, get_snippet_by_key as api_get_snippet_by_key, get_subscription_page_configs as api_get_subscription_page_configs, get_external_squads as api_get_external_squads, get_config_profiles as api_get_config_profiles, get_user_accessible_nodes as api_get_user_accessible_nodes, close_all_clients, extract_payload
@@ -1251,7 +1252,7 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             p_dict = dict(p)
             strategy = p_dict.get('reset_strategy', 'NO_RESET')
             strategy_label = get_strategy_label(strategy)
-            btn_text = f"{p_dict['name']} | ¥{p_dict['price']} | {p_dict['gb']}G ({strategy_label})"
+            btn_text = f"{p_dict['name']} | ¥{p_dict['price']} | {p_dict['gb']}G ({strategy_label}) | {stock_label(p_dict)}"
             action = f"order_{p_dict['key']}_new_0"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=action)])
         keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_home")])
@@ -1366,7 +1367,7 @@ async def client_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             p_dict = dict(p)
             strategy = p_dict.get('reset_strategy', 'NO_RESET')
             strategy_label = get_strategy_label(strategy)
-            btn_text = f"{p_dict['name']} | ¥{p_dict['price']} | {p_dict['gb']}G ({strategy_label})"
+            btn_text = f"{p_dict['name']} | ¥{p_dict['price']} | {p_dict['gb']}G ({strategy_label}) | {stock_label(p_dict)}"
             action = f"order_{p_dict['key']}_renew_{short_id}"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=action)])
         keyboard.append([InlineKeyboardButton("🔙 返回列表", callback_data="client_status")])
@@ -1433,7 +1434,13 @@ async def handle_alipay_checkout(update, context, plan_key, order_type, short_id
         intent = payments.subscription_checkout(DB_FILE, update.effective_user.id, plan_key, order_type, target,
                                                 channel_code=context.user_data.get('channel_code'), group_uuid=TARGET_GROUP_UUID)
         payable = payments.prepare_direct_payment(DB_FILE, intent['payment_id'])
-    except (PaymentError, ValueError, TypeError, PanelApiError, httpx.HTTPError):
+    except PaymentError as exc:
+        if str(exc) == 'plan_sold_out':
+            await update.callback_query.answer('该套餐已售罄，请选择其他套餐或联系管理员补货。', show_alert=True)
+            return
+        await update.callback_query.answer('无法创建支付订单，请检查套餐价格、订阅归属或联系管理员。', show_alert=True)
+        return
+    except (ValueError, TypeError, PanelApiError, httpx.HTTPError):
         await update.callback_query.answer("无法创建支付订单，请检查套餐价格、订阅归属或联系管理员。", show_alert=True)
         return
     kb = []
@@ -1473,8 +1480,9 @@ async def show_payment_method_menu(update, context, plan_key, order_type, short_
         f"🧾 **下单确认（{type_str}）**\n"
         f"📦 套餐：{plan_dict['name']}\n"
         f"💰 金额：{plan_dict.get('price')}\n"
-        f"📡 流量：{plan_dict.get('gb')} GB\n\n"
-        "请选择下一步："
+        f"📡 流量：{plan_dict.get('gb')} GB\n"
+        f"📦 库存：{stock_label(plan_dict)}\n\n"
+        "下单时占用 1 份库存；已下单请从我的订单继续付款。\n请选择下一步："
     )
     kb = []
     if payment_config_ready():
@@ -1606,7 +1614,13 @@ async def handle_order_confirmation(update, context, plan_key, order_type, short
         order = manual_orders.create_order(DB_FILE, update.effective_user.id, plan_key, order_type, target,
                                            payment_method, group_uuid=TARGET_GROUP_UUID,
                                            channel_code=context.user_data.get('channel_code'))
-    except (PaymentError, ValueError, TypeError, PanelApiError, httpx.HTTPError):
+    except PaymentError as exc:
+        if str(exc) == 'plan_sold_out':
+            await update.callback_query.answer('该套餐已售罄，请选择其他套餐或联系管理员补货。', show_alert=True)
+            return
+        await update.callback_query.answer('无法创建人工订单，请检查套餐价格、内部组和订阅归属。', show_alert=True)
+        return
+    except (ValueError, TypeError, PanelApiError, httpx.HTTPError):
         await update.callback_query.answer('无法创建人工订单，请检查套餐价格、内部组和订阅归属。', show_alert=True)
         return
     await show_manual_payment_order(update, context, order)
@@ -1691,7 +1705,7 @@ async def show_plan_group_selection(update, context):
                  [InlineKeyboardButton('💾 保存所选内部组', callback_data=f'{prefix}save')],
                  [InlineKeyboardButton('取消', callback_data='cancel_op')]])
     missing = set(state['selected']) - {item['uuid'] for item in options}
-    title = '🧩 套餐内部组' if state['plan_key'] else '🧩 步骤 6/6：选择套餐内部组'
+    title = '🧩 套餐内部组' if state['plan_key'] else '🧩 步骤 7/7：选择套餐内部组'
     text = (f'{title}\n可多选；至少选择一个。共 {len(options)} 个组，'
             f'第 {page+1}/{max(1, (len(options)+7)//8)} 页，已选 {len(state["selected"])} 个。\n'
             '新购使用所选组；续费按购买时套餐的所选组更新权限。')
@@ -1746,8 +1760,8 @@ async def handle_plan_group_selection(update, context):
                         raise ValueError('套餐创建流程已失效')
                     plan = context.user_data['new_plan']
                     key = 'p' + os.urandom(6).hex()
-                    db_execute('INSERT INTO plans (key,name,price,usdt_price,days,gb,reset_strategy,group_uuids) VALUES (?,?,?,?,?,?,?,?)',
-                               (key, plan['name'], plan['price'], '', plan['days'], plan['gb'], plan['reset_strategy'], encoded))
+                    db_execute('INSERT INTO plans (key,name,price,usdt_price,days,gb,reset_strategy,group_uuids,stock) VALUES (?,?,?,?,?,?,?,?,?)',
+                               (key, plan['name'], plan['price'], '', plan['days'], plan['gb'], plan['reset_strategy'], encoded, plan['stock']))
                     context.user_data.pop('add_plan_step', None)
                     context.user_data.pop('new_plan', None)
                 context.user_data.pop('plan_group_selection', None)
@@ -1767,7 +1781,7 @@ async def show_plans_menu(update, context):
     keyboard = []
     for p in plans:
         p_dict = dict(p)
-        btn_text = f"{p_dict['name']} | ¥{p_dict['price']} | {p_dict['gb']}G"
+        btn_text = f"{p_dict['name']} | ¥{p_dict['price']} | {p_dict['gb']}G | {stock_label(p_dict)}"
         keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"plan_detail_{p_dict['key']}")])
     keyboard.append([InlineKeyboardButton("➕ 添加新套餐", callback_data="add_plan_start")])
     keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="back_home")])
@@ -1919,6 +1933,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     if data in {'admin_plans_list', 'cancel_op', 'back_home'}:
         context.user_data.pop('plan_usdt_price_key', None)
+        context.user_data.pop('plan_stock_key', None)
         context.user_data.pop('plan_group_selection', None)
     if not data.startswith('admin_limit_'):
         context.user_data.pop('hwid_limit_user', None)
@@ -2750,7 +2765,22 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await enable_panel_user(uid)
         await query.answer("✅ 已尝试解封该用户", show_alert=False)
         return
+    if data.startswith('admin_plan_stock_'):
+        key = data.removeprefix('admin_plan_stock_')
+        plan = db_query('SELECT * FROM plans WHERE key=?', (key,), one=True)
+        if not plan:
+            await query.answer('套餐不存在。', show_alert=True)
+            return
+        context.user_data.pop('plan_usdt_price_key', None)
+        context.user_data['plan_stock_key'] = key
+        await send_or_edit_menu(update, context,
+                               f'当前库存：{stock_label(plan)}\n请输入新的剩余份数（非负整数）；0 为售罄，输入 不限量 或 -1 取消限制。\n'
+                               '此处设置的是可供新订单使用的库存，不包含已占用份数。新购和续费共用库存。\n'
+                               '人工订单取消或拒绝后返还；在线订单删除不返还；失败订单保留占用，需人工核对。',
+                               InlineKeyboardMarkup([[InlineKeyboardButton('取消', callback_data='admin_plans_list')]]), parse_mode=None)
+        return
     if data.startswith('admin_plan_usdt_'):
+        context.user_data.pop('plan_stock_key', None)
         key = data.removeprefix('admin_plan_usdt_')
         if not db_query('SELECT key FROM plans WHERE key=?', (key,), one=True):
             await query.answer('套餐不存在。', show_alert=True)
@@ -2780,11 +2810,12 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 group_text += f'\n…共 {len(assigned)} 个组，完整列表请进入选择界面查看。'
         except (ValueError, TypeError):
             group_text = '配置无效，请重新选择'
+        msg += f"\n📦 库存：{stock_label(p_dict)}"
         msg += f"\nUSDT 价格：{p_dict.get('usdt_price') or '未设置'}"
         msg += f"\n\n内部组 UUID：\n{group_text}"
         if p_dict.get('group_uuids') is None:
             msg += "\n（旧套餐：使用默认组；建议改为独立选择）"
-        keyboard = [[InlineKeyboardButton('设置 USDT 价格', callback_data=f'admin_plan_usdt_{key}')], [InlineKeyboardButton("🧩 选择内部组", callback_data=f"admin_plan_groups_{key}")], [InlineKeyboardButton("🗑 删除此套餐", callback_data=f"del_plan_{key}")], [InlineKeyboardButton("🔙 返回列表", callback_data="admin_plans_list")]]
+        keyboard = [[InlineKeyboardButton('设置剩余数量', callback_data=f'admin_plan_stock_{key}')], [InlineKeyboardButton('设置 USDT 价格', callback_data=f'admin_plan_usdt_{key}')], [InlineKeyboardButton("🧩 选择内部组", callback_data=f"admin_plan_groups_{key}")], [InlineKeyboardButton("🗑 删除此套餐", callback_data=f"del_plan_{key}")], [InlineKeyboardButton("🔙 返回列表", callback_data="admin_plans_list")]]
         await send_or_edit_menu(update, context, msg, InlineKeyboardMarkup(keyboard))
     elif data.startswith("del_plan_"):
         key = data.split("_")[2]
@@ -2984,6 +3015,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🔙 返回设备', callback_data=f'admin_devices_{panel_user_id}')]]))
         return
 
+    if user_id == ADMIN_ID and context.user_data.get('plan_stock_key') and text:
+        key = context.user_data['plan_stock_key']
+        try:
+            stock = parse_stock(text)
+        except ValueError as exc:
+            await update.message.reply_text(str(exc))
+            return
+        changed = db_execute('UPDATE plans SET stock=? WHERE key=?', (stock, key))
+        context.user_data.pop('plan_stock_key', None)
+        await update.message.reply_text('✅ 库存已设置：' + stock_label({'stock': stock}) if changed else '套餐已删除，未保存。',
+                                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('返回套餐管理', callback_data='admin_plans_list')]]))
+        return
     if user_id == ADMIN_ID and context.user_data.get('plan_usdt_price_key') and text:
         key = context.user_data['plan_usdt_price_key']
         try:
@@ -3406,7 +3449,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return await update.message.reply_text('❌ 套餐名称须为 1–90 个字符', reply_markup=cancel_kb)
             context.user_data['new_plan'] = {'name': text.strip(), 'usdt_price': ''}
             context.user_data['add_plan_step'] = 'price'
-            await update.message.reply_text("📝 **步骤 2/6：请输入人民币价格**\n(例如: 200元)", reply_markup=cancel_kb, parse_mode='Markdown')
+            await update.message.reply_text("📝 **步骤 2/7：请输入人民币价格**\n(例如: 200元)", reply_markup=cancel_kb, parse_mode='Markdown')
         elif step == 'price':
             try:
                 amount = money_fen(text, display=True)
@@ -3414,18 +3457,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return await update.message.reply_text('❌ 请输入大于零、最多两位小数的人民币价格，例如 200.00', reply_markup=cancel_kb)
             context.user_data['new_plan']['price'] = yuan(amount)
             context.user_data['add_plan_step'] = 'days'
-            await update.message.reply_text("📅 **步骤 3/6：请输入有效期天数**\n(请输入正整数，例如: 30)", reply_markup=cancel_kb, parse_mode='Markdown')
+            await update.message.reply_text("📅 **步骤 3/7：请输入有效期天数**\n(请输入正整数，例如: 30)", reply_markup=cancel_kb, parse_mode='Markdown')
         elif step == 'days':
             if not text.isdigit() or int(text) < 1: return await update.message.reply_text("❌ 请输入数字", reply_markup=cancel_kb)
             context.user_data['new_plan']['days'] = int(text)
             context.user_data['add_plan_step'] = 'gb'
-            await update.message.reply_text("📡 **步骤 4/6：请输入流量限制 GB**\n(请输入纯数字，例如: 100)", reply_markup=cancel_kb, parse_mode='Markdown')
+            await update.message.reply_text("📡 **步骤 4/7：请输入流量限制 GB**\n(请输入纯数字，例如: 100)", reply_markup=cancel_kb, parse_mode='Markdown')
         elif step == 'gb':
             if not text.isdigit(): return await update.message.reply_text("❌ 请输入数字", reply_markup=cancel_kb)
             context.user_data['new_plan']['gb'] = int(text)
+            context.user_data['add_plan_step'] = 'stock'
+            await update.message.reply_text('📦 步骤 5/7：请输入剩余数量（非负整数）；0 为售罄，输入 不限量 或 -1 取消限制。', reply_markup=cancel_kb)
+        elif step == 'stock':
+            try:
+                context.user_data['new_plan']['stock'] = parse_stock(text)
+            except ValueError as exc:
+                await update.message.reply_text(str(exc), reply_markup=cancel_kb)
+                return
             context.user_data['add_plan_step'] = 'strategy'
             keyboard = [[InlineKeyboardButton("🚫 永不重置", callback_data="set_strategy_NO_RESET")], [InlineKeyboardButton("📅 每日重置", callback_data="set_strategy_DAY")], [InlineKeyboardButton("🗓 每周重置", callback_data="set_strategy_WEEK")], [InlineKeyboardButton("🌝 每月重置", callback_data="set_strategy_MONTH")], [InlineKeyboardButton("🌙 按开通日每月重置", callback_data="set_strategy_MONTH_ROLLING")], [InlineKeyboardButton("❌ 取消", callback_data="cancel_op")]]
-            await update.message.reply_text("🔄 **步骤 5/6：请选择流量重置策略**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+            await update.message.reply_text("🔄 **步骤 6/7：请选择流量重置策略**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
         return
     awaiting_order_id = context.user_data.get('awaiting_manual_review_proof_order_id')
     pending_order = manual_orders.pending_order(DB_FILE, user_id, awaiting_order_id)
@@ -3459,7 +3510,7 @@ async def add_plan_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     context.user_data.pop('plan_group_selection', None)
     context.user_data['add_plan_step'] = 'name'
-    await send_or_edit_menu(update, context, "📝 **步骤 1/6：开始添加套餐**\n\n请输入套餐名称:",
+    await send_or_edit_menu(update, context, "📝 **步骤 1/7：开始添加套餐**\n\n请输入套餐名称:",
                             InlineKeyboardMarkup([[InlineKeyboardButton("❌ 取消", callback_data="cancel_op")]]))
 
 

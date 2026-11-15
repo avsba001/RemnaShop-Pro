@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from services.zpay import PaymentError, money_fen
 from storage.db import _connect, db_query, db_execute
 from storage.plan_groups import plan_groups
+from storage.plan_stock import reserve_stock
 
 
 VISIBLE_ORDER_SQL = "NOT EXISTS (SELECT 1 FROM order_deletions d WHERE d.order_id=orders.order_id)"
@@ -168,6 +169,7 @@ def subscription_checkout(db_file, tg_id, plan_key, order_type, target_user_id, 
             (order_id,tg_id,plan_key,order_type,target_user_id,status,channel_code,created_at,updated_at)
             VALUES (?,?,?,?,?,'pending',?,?,?)""",
                      (order_id, tg_id, plan_key, order_type, target_user_id or None, channel_code, now, now))
+        reserve_stock(conn, plan_key, order_id)
         conn.execute("""INSERT INTO order_audit_logs(order_id,action,actor_id,detail,created_at)
             VALUES (?,'create',?,'alipay_online_snapshot',?)""", (order_id, tg_id, now))
         return insert_intent(conn, product_kind="subscription", business_id=order_id, owner_id=tg_id,
